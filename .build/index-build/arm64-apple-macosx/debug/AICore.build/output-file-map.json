@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/AICore.build/master.swiftdeps"
+  },
+  "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/Sources/AICore/AIAssistService.swift": {
+    "dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/AICore.build/AIAssistService.d",
+    "object": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/AICore.build/AIAssistService.swift.o",
+    "swiftmodule": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/AICore.build/AIAssistService~partial.swiftmodule",
+    "swift-dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/AICore.build/AIAssistService.swiftdeps",
+    "diagnostics": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/AICore.build/AIAssistService.dia"
+  }
+}

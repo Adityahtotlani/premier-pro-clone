@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/PlaybackCore.build/master.swiftdeps"
+  },
+  "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/Sources/PlaybackCore/PlaybackEngine.swift": {
+    "dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/PlaybackCore.build/PlaybackEngine.d",
+    "object": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/PlaybackCore.build/PlaybackEngine.swift.o",
+    "swiftmodule": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/PlaybackCore.build/PlaybackEngine~partial.swiftmodule",
+    "swift-dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/PlaybackCore.build/PlaybackEngine.swiftdeps",
+    "diagnostics": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/PlaybackCore.build/PlaybackEngine.dia"
+  }
+}

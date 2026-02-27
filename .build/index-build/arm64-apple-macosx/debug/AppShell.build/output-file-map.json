@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/AppShell.build/master.swiftdeps"
+  },
+  "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/Sources/AppShell/EditorWorkspace.swift": {
+    "dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/AppShell.build/EditorWorkspace.d",
+    "object": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/AppShell.build/EditorWorkspace.swift.o",
+    "swiftmodule": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/AppShell.build/EditorWorkspace~partial.swiftmodule",
+    "swift-dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/AppShell.build/EditorWorkspace.swiftdeps",
+    "diagnostics": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/AppShell.build/EditorWorkspace.dia"
+  }
+}

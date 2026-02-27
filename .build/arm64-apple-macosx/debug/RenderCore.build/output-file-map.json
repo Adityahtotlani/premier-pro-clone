@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/arm64-apple-macosx/debug/RenderCore.build/master.swiftdeps"
+  },
+  "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/Sources/RenderCore/RenderEngine.swift": {
+    "dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/arm64-apple-macosx/debug/RenderCore.build/RenderEngine.d",
+    "object": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/arm64-apple-macosx/debug/RenderCore.build/RenderEngine.swift.o",
+    "swiftmodule": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/arm64-apple-macosx/debug/RenderCore.build/RenderEngine~partial.swiftmodule",
+    "swift-dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/arm64-apple-macosx/debug/RenderCore.build/RenderEngine.swiftdeps",
+    "diagnostics": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/arm64-apple-macosx/debug/RenderCore.build/RenderEngine.dia"
+  }
+}

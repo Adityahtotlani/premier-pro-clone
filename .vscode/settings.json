@@ -1,0 +1,21 @@
+{
+  "files.exclude": {
+    "**/.build": true,
+    "**/.swiftpm": true
+  },
+  "search.exclude": {
+    "**/.build": true,
+    "**/.swiftpm": true
+  },
+  "files.watcherExclude": {
+    "**/.build/**": true,
+    "**/.swiftpm/**": true
+  },
+  "terminal.integrated.cwd": "${workspaceFolder}",
+  "editor.rulers": [120],
+  "[swift]": {
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.formatOnSave": true
+  }
+}

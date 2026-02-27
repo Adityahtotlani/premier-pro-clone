@@ -1,0 +1,41 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "swift: Build Debug PremierCloneApp",
+      "type": "shell",
+      "command": "swift build --product PremierCloneApp",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$swiftc"
+    },
+    {
+      "label": "swift: Build Release PremierCloneApp",
+      "type": "shell",
+      "command": "swift build -c release --product PremierCloneApp",
+      "group": "build",
+      "problemMatcher": "$swiftc"
+    },
+    {
+      "label": "swift: Test",
+      "type": "shell",
+      "command": "swift test",
+      "group": "test",
+      "problemMatcher": "$swiftc"
+    },
+    {
+      "label": "swift: Run PremierCloneApp",
+      "type": "shell",
+      "command": "swift run PremierCloneApp",
+      "problemMatcher": "$swiftc"
+    },
+    {
+      "label": "swift: Clean",
+      "type": "shell",
+      "command": "swift package clean",
+      "problemMatcher": []
+    }
+  ]
+}

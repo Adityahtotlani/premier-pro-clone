@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "name": "Debug PremierCloneApp",
+      "target": "PremierCloneApp",
+      "configuration": "debug",
+      "cwd": "${workspaceFolder:Permier Pro Clone code}",
+      "args": [],
+      "preLaunchTask": "swift: Build Debug PremierCloneApp"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "name": "Release PremierCloneApp",
+      "target": "PremierCloneApp",
+      "configuration": "release",
+      "cwd": "${workspaceFolder:Permier Pro Clone code}",
+      "args": [],
+      "preLaunchTask": "swift: Build Release PremierCloneApp"
+    }
+  ]
+}

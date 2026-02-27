@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/ProjectCoreTests.build/master.swiftdeps"
+  },
+  "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/Tests/ProjectCoreTests/ProjectCoreTests.swift": {
+    "dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/ProjectCoreTests.build/ProjectCoreTests.d",
+    "object": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/ProjectCoreTests.build/ProjectCoreTests.swift.o",
+    "swiftmodule": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/ProjectCoreTests.build/ProjectCoreTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/ProjectCoreTests.build/ProjectCoreTests.swiftdeps",
+    "diagnostics": "/Users/adityatotlani/Library/Mobile Documents/com~apple~CloudDocs/Permier Pro Clone code/.build/index-build/arm64-apple-macosx/debug/ProjectCoreTests.build/ProjectCoreTests.dia"
+  }
+}
