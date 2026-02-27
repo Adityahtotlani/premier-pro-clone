@@ -1,0 +1,16 @@
+# macOS junk
+.DS_Store
+
+# Swift build
+.build/
+DerivedData/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Node modules
+node_modules/
+
+# Environment files
+.env
