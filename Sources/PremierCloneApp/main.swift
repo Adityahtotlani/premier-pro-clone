@@ -1,8 +1,24 @@
 import SwiftUI
 import AppShell
+#if canImport(AppKit)
+import AppKit
+#endif
+
+#if canImport(AppKit)
+final class PremierCloneAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSWindow.allowsAutomaticWindowTabbing = false
+    }
+}
+#endif
 
 @main
 struct PremierCloneApplication: App {
+    #if canImport(AppKit)
+    @NSApplicationDelegateAdaptor(PremierCloneAppDelegate.self)
+    private var appDelegate
+    #endif
+
     var body: some Scene {
         WindowGroup("Premier Clone") {
             EditorRootView()
@@ -50,6 +66,30 @@ struct PremierCloneApplication: App {
             }
 
             CommandMenu("Timeline") {
+                Button("New Sequence") {
+                    EditorCommand.post(EditorCommand.newSequence)
+                }
+                .keyboardShortcut("n", modifiers: [.command, .option])
+
+                Button("Duplicate Sequence") {
+                    EditorCommand.post(EditorCommand.duplicateSequence)
+                }
+                .keyboardShortcut("d", modifiers: [.command, .option])
+
+                Divider()
+
+                Button("Add Marker") {
+                    EditorCommand.post(EditorCommand.addMarker)
+                }
+                .keyboardShortcut("m", modifiers: .command)
+
+                Button("Jump To Next Marker") {
+                    EditorCommand.post(EditorCommand.nextMarker)
+                }
+                .keyboardShortcut("'", modifiers: .command)
+
+                Divider()
+
                 Button("Toggle Track/Magnetic Mode") {
                     EditorCommand.post(EditorCommand.toggleTimelineMode)
                 }

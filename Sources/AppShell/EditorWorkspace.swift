@@ -22,6 +22,10 @@ public enum EditorCommand {
     public static let appendFirstAsset = Notification.Name("EditorCommand.appendFirstAsset")
     public static let splitFirstClip = Notification.Name("EditorCommand.splitFirstClip")
     public static let rippleDeleteFirstClip = Notification.Name("EditorCommand.rippleDeleteFirstClip")
+    public static let newSequence = Notification.Name("EditorCommand.newSequence")
+    public static let duplicateSequence = Notification.Name("EditorCommand.duplicateSequence")
+    public static let addMarker = Notification.Name("EditorCommand.addMarker")
+    public static let nextMarker = Notification.Name("EditorCommand.nextMarker")
     public static let toggleTimelineMode = Notification.Name("EditorCommand.toggleTimelineMode")
     public static let toggleShortcutHelp = Notification.Name("EditorCommand.toggleShortcutHelp")
 
@@ -35,10 +39,16 @@ public final class EditorWorkspace: ObservableObject {
     @Published public var project: Project
     @Published public var statusMessage: String
     @Published public var lastAIArtifact: AIArtifact?
+    @Published public var activeSequenceID: UUID?
+    @Published public var selectedAssetID: UUID?
+    @Published public var selectedClipID: UUID?
     @Published public var currentProjectBundleURL: URL?
     @Published public var lastAutosaveURL: URL?
     @Published public var playheadTime: TimeInterval
     @Published public var showsShortcutHelp: Bool
+    @Published public var exportProgress: Double
+    @Published public var exportStatusMessage: String
+    @Published public var completedExports: [RenderJob]
 
     public let timelineEngine: TimelineEngine
     public let playbackEngine: PlaybackEngine
@@ -49,6 +59,7 @@ public final class EditorWorkspace: ObservableObject {
     private let mediaImporter: MediaImporter
     private let proxyManager: ProxyManager
     private var autosaveTimer: Timer?
+    private var exportProgressTask: Task<Void, Never>?
 
     public init(
         project: Project = ProjectFactory.starterProject(name: "Untitled Project"),
@@ -72,28 +83,78 @@ public final class EditorWorkspace: ObservableObject {
         statusMessage = "Ready"
         playheadTime = 0
         showsShortcutHelp = false
+        activeSequenceID = project.sequences.first?.id
+        exportProgress = 0
+        exportStatusMessage = "Idle"
+        completedExports = []
     }
 
     public var activeSequence: EditorSequence? {
-        project.sequences.first
+        if let activeSequenceID,
+           let matched = project.sequences.first(where: { $0.id == activeSequenceID }) {
+            return matched
+        }
+        return project.sequences.first
+    }
+
+    public var selectedClip: ClipRef? {
+        clipSelection?.clip
+    }
+
+    public var selectedClipTrackKind: TrackKind? {
+        clipSelection?.kind
+    }
+
+    private var clipSelection: (clip: ClipRef, kind: TrackKind, trackID: UUID)? {
+        guard let selectedClipID else { return nil }
+        guard let sequence = activeSequence else { return nil }
+
+        for track in sequence.videoTracks {
+            if let clip = track.clips.first(where: { $0.id == selectedClipID }) {
+                return (clip, .video, track.id)
+            }
+        }
+
+        for track in sequence.audioTracks {
+            if let clip = track.clips.first(where: { $0.id == selectedClipID }) {
+                return (clip, .audio, track.id)
+            }
+        }
+
+        return nil
     }
 
     public func createNewProject(named name: String = "Untitled Project") {
+        exportProgressTask?.cancel()
+        exportProgressTask = nil
         project = ProjectFactory.starterProject(name: name)
         currentProjectBundleURL = nil
         lastAutosaveURL = nil
         lastAIArtifact = nil
+        selectedAssetID = nil
+        selectedClipID = nil
+        activeSequenceID = project.sequences.first?.id
         playheadTime = 0
+        exportProgress = 0
+        exportStatusMessage = "Idle"
+        completedExports = []
         statusMessage = "Created new project"
         restartAutosaveTimer()
     }
 
     public func openProject(at bundleURL: URL) {
         do {
+            exportProgressTask?.cancel()
+            exportProgressTask = nil
             let loaded = try projectStore.load(from: bundleURL)
             project = loaded
             currentProjectBundleURL = bundleURL
+            selectedAssetID = loaded.assets.first?.id
+            selectedClipID = nil
+            activeSequenceID = loaded.sequences.first?.id
             playheadTime = 0
+            exportProgress = 0
+            exportStatusMessage = "Idle"
             statusMessage = "Opened \(bundleURL.lastPathComponent)"
             restartAutosaveTimer()
         } catch {
@@ -101,6 +162,10 @@ public final class EditorWorkspace: ObservableObject {
                 if let recovered = try projectStore.recoverLatestAutosave(from: bundleURL) {
                     project = recovered
                     currentProjectBundleURL = bundleURL
+                    selectedAssetID = recovered.assets.first?.id
+                    activeSequenceID = recovered.sequences.first?.id
+                    exportProgress = 0
+                    exportStatusMessage = "Idle"
                     statusMessage = "Recovered latest autosave from \(bundleURL.lastPathComponent)"
                     restartAutosaveTimer()
                     return
@@ -148,6 +213,7 @@ public final class EditorWorkspace: ObservableObject {
                 to: project
             )
             project = result.0
+            sanitizeSelectedClip()
             playheadTime = min(playheadTime, result.1.resultingDuration)
             statusMessage = "Switched to \(nextMode.rawValue) mode"
         } catch {
@@ -161,6 +227,7 @@ public final class EditorWorkspace: ObservableObject {
             return
         }
 
+        selectedAssetID = firstAsset.id
         appendAssetToTimeline(assetID: firstAsset.id)
     }
 
@@ -169,6 +236,7 @@ public final class EditorWorkspace: ObservableObject {
             statusMessage = "Asset not found"
             return
         }
+        selectedAssetID = assetID
 
         guard let sequence = activeSequence,
               let sequenceIndex = project.sequences.firstIndex(where: { $0.id == sequence.id }) else {
@@ -221,6 +289,7 @@ public final class EditorWorkspace: ObservableObject {
             }
 
             project = workingProject
+            selectedClipID = clip.id
             playheadTime += clipDuration
             statusMessage = "Inserted \(asset.name) at \(timecode(playheadTime - clipDuration))"
         } catch {
@@ -250,6 +319,7 @@ public final class EditorWorkspace: ObservableObject {
                 to: project
             )
             project = result.0
+            sanitizeSelectedClip()
             statusMessage = "Split first clip at \(timecode(splitTime))"
         } catch {
             statusMessage = "Split failed: \(error.localizedDescription)"
@@ -275,6 +345,7 @@ public final class EditorWorkspace: ObservableObject {
                 to: project
             )
             project = result.0
+            sanitizeSelectedClip()
             playheadTime = min(playheadTime, result.1.resultingDuration)
             statusMessage = "Ripple deleted first clip"
         } catch {
@@ -309,10 +380,22 @@ public final class EditorWorkspace: ObservableObject {
 
         do {
             _ = try renderEngine.enqueue(projectID: project.id, sequenceID: sequence.id, presetID: presetID)
+            exportProgress = 0
+            exportStatusMessage = "Rendering \(presetID)"
+            startExportProgressSimulation()
             statusMessage = "Export job started (\(presetID))"
         } catch {
             statusMessage = "Export failed: \(error.localizedDescription)"
         }
+    }
+
+    public func cancelExport() {
+        exportProgressTask?.cancel()
+        exportProgressTask = nil
+        exportProgress = 0
+        exportStatusMessage = "Cancelled"
+        _ = try? renderEngine.failCurrentJob()
+        statusMessage = "Export cancelled"
     }
 
     public func importMedia(urls: [URL]) {
@@ -348,7 +431,246 @@ public final class EditorWorkspace: ObservableObject {
         }
 
         project = updatedProject
+        if selectedAssetID == nil {
+            selectedAssetID = result.importedAssets.first?.id
+        }
+        sanitizeSelectedClip()
         statusMessage = "Imported \(insertedCount) assets"
+    }
+
+    public func selectClip(_ clipID: UUID?) {
+        selectedClipID = clipID
+    }
+
+    public func selectAsset(_ assetID: UUID?) {
+        selectedAssetID = assetID
+    }
+
+    public func appendSelectedAssetToTimeline() {
+        guard let selectedAssetID else {
+            statusMessage = "Select an asset in the browser first"
+            return
+        }
+        appendAssetToTimeline(assetID: selectedAssetID)
+    }
+
+    public func setActiveSequence(_ sequenceID: UUID) {
+        guard project.sequences.contains(where: { $0.id == sequenceID }) else { return }
+        activeSequenceID = sequenceID
+        selectedClipID = nil
+        playheadTime = 0
+        statusMessage = "Switched sequence"
+    }
+
+    public func createSequence(named name: String? = nil) {
+        var updatedProject = project
+        let defaultName = "Sequence \(updatedProject.sequences.count + 1)"
+        let sequenceName = name?.isEmpty == false ? name! : defaultName
+
+        let newSequence = EditorSequence(
+            name: sequenceName,
+            mode: .track,
+            duration: 0,
+            videoTracks: [TimelineTrack(name: "V1", kind: .video)],
+            audioTracks: [TimelineTrack(name: "A1", kind: .audio)]
+        )
+
+        updatedProject.sequences.append(newSequence)
+        project = updatedProject
+        activeSequenceID = newSequence.id
+        selectedClipID = nil
+        playheadTime = 0
+        statusMessage = "Created \(sequenceName)"
+    }
+
+    public func duplicateActiveSequence() {
+        guard let sequence = activeSequence else { return }
+        var duplicated = sequence
+        duplicated.id = UUID()
+        duplicated.name = "\(sequence.name) Copy"
+        duplicated.markers = []
+
+        for trackIndex in duplicated.videoTracks.indices {
+            for clipIndex in duplicated.videoTracks[trackIndex].clips.indices {
+                duplicated.videoTracks[trackIndex].clips[clipIndex].id = UUID()
+            }
+        }
+
+        for trackIndex in duplicated.audioTracks.indices {
+            for clipIndex in duplicated.audioTracks[trackIndex].clips.indices {
+                duplicated.audioTracks[trackIndex].clips[clipIndex].id = UUID()
+            }
+        }
+
+        var updatedProject = project
+        updatedProject.sequences.append(duplicated)
+        project = updatedProject
+        activeSequenceID = duplicated.id
+        selectedClipID = nil
+        playheadTime = 0
+        statusMessage = "Duplicated sequence"
+    }
+
+    public func addMarkerAtPlayhead(label: String = "Marker") {
+        guard let activeSequenceID,
+              let sequenceIndex = project.sequences.firstIndex(where: { $0.id == activeSequenceID }) else { return }
+        var updatedProject = project
+        let marker = TimelineMarker(time: playheadTime, label: label)
+        updatedProject.sequences[sequenceIndex].markers.append(marker)
+        updatedProject.sequences[sequenceIndex].markers.sort { $0.time < $1.time }
+        project = updatedProject
+        statusMessage = "Marker added at \(timecode(playheadTime))"
+    }
+
+    public func jumpToNextMarker() {
+        guard let sequence = activeSequence else { return }
+        let markers = sequence.markers.sorted { $0.time < $1.time }
+        guard let marker = markers.first(where: { $0.time > playheadTime + 0.001 }) else {
+            statusMessage = "No next marker"
+            return
+        }
+        playheadTime = marker.time
+        statusMessage = "Jumped to marker: \(marker.label)"
+    }
+
+    public func nudgeSelectedClip(by seconds: TimeInterval) {
+        guard let sequence = activeSequence, let selection = clipSelection else {
+            statusMessage = "Select a clip first"
+            return
+        }
+
+        let targetTime = max(0, selection.clip.timelineIn + seconds)
+
+        do {
+            let result = try timelineEngine.apply(
+                operation: .moveClip(
+                    sequenceID: sequence.id,
+                    trackID: selection.trackID,
+                    trackKind: selection.kind,
+                    clipID: selection.clip.id,
+                    newTimelineIn: targetTime
+                ),
+                to: project
+            )
+            project = result.0
+            statusMessage = "Moved clip to \(timecode(targetTime))"
+        } catch {
+            statusMessage = "Move failed: \(error.localizedDescription)"
+        }
+    }
+
+    public func trimSelectedClipLeading(by delta: TimeInterval) {
+        guard let sequence = activeSequence, let selection = clipSelection else {
+            statusMessage = "Select a clip first"
+            return
+        }
+
+        let maxStart = selection.clip.outTime - 0.2
+        let newIn = min(maxStart, max(0, selection.clip.inTime + delta))
+
+        do {
+            let result = try timelineEngine.apply(
+                operation: .trimClip(
+                    sequenceID: sequence.id,
+                    trackID: selection.trackID,
+                    trackKind: selection.kind,
+                    clipID: selection.clip.id,
+                    newIn: newIn,
+                    newOut: selection.clip.outTime
+                ),
+                to: project
+            )
+            project = result.0
+            statusMessage = "Trimmed clip start"
+        } catch {
+            statusMessage = "Trim failed: \(error.localizedDescription)"
+        }
+    }
+
+    public func trimSelectedClipTrailing(by delta: TimeInterval) {
+        guard let sequence = activeSequence, let selection = clipSelection else {
+            statusMessage = "Select a clip first"
+            return
+        }
+
+        let minEnd = selection.clip.inTime + 0.2
+        let newOut = max(minEnd, selection.clip.outTime + delta)
+
+        do {
+            let result = try timelineEngine.apply(
+                operation: .trimClip(
+                    sequenceID: sequence.id,
+                    trackID: selection.trackID,
+                    trackKind: selection.kind,
+                    clipID: selection.clip.id,
+                    newIn: selection.clip.inTime,
+                    newOut: newOut
+                ),
+                to: project
+            )
+            project = result.0
+            statusMessage = "Trimmed clip end"
+        } catch {
+            statusMessage = "Trim failed: \(error.localizedDescription)"
+        }
+    }
+
+    public func rippleDeleteSelectedClip() {
+        guard let sequence = activeSequence, let selection = clipSelection else {
+            statusMessage = "Select a clip first"
+            return
+        }
+
+        do {
+            let result = try timelineEngine.apply(
+                operation: .rippleDelete(
+                    sequenceID: sequence.id,
+                    trackID: selection.trackID,
+                    trackKind: selection.kind,
+                    clipID: selection.clip.id
+                ),
+                to: project
+            )
+            project = result.0
+            sanitizeSelectedClip()
+            playheadTime = min(playheadTime, result.1.resultingDuration)
+            statusMessage = "Ripple deleted selected clip"
+        } catch {
+            statusMessage = "Delete failed: \(error.localizedDescription)"
+        }
+    }
+
+    public func updateSelectedClipPositionX(_ value: Double) {
+        updateSelectedClip { clip in
+            clip.transforms.positionX = value
+        }
+    }
+
+    public func updateSelectedClipPositionY(_ value: Double) {
+        updateSelectedClip { clip in
+            clip.transforms.positionY = value
+        }
+    }
+
+    public func updateSelectedClipScale(_ value: Double) {
+        let safeScale = max(0.1, value)
+        updateSelectedClip { clip in
+            clip.transforms.scaleX = safeScale
+            clip.transforms.scaleY = safeScale
+        }
+    }
+
+    public func updateSelectedClipOpacity(_ value: Double) {
+        let safeOpacity = min(1.0, max(0.0, value))
+        updateSelectedClip { clip in
+            clip.transforms.opacity = safeOpacity
+        }
+    }
+
+    public func updateSelectedClipGain(_ value: Double) {
+        updateSelectedClip { clip in
+            clip.gain = min(2.0, max(0.0, value))
+        }
     }
 
     public func generateProxyManifest() {
@@ -467,6 +789,30 @@ public final class EditorWorkspace: ObservableObject {
         }
     }
 
+    private func startExportProgressSimulation() {
+        exportProgressTask?.cancel()
+        exportProgressTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let self else { return }
+
+                await MainActor.run {
+                    self.exportProgress = min(1.0, self.exportProgress + 0.03)
+
+                    if self.exportProgress >= 1.0 {
+                        self.exportProgressTask?.cancel()
+                        self.exportProgressTask = nil
+                        if let completed = try? self.renderEngine.completeCurrentJob() {
+                            self.completedExports.insert(completed, at: 0)
+                        }
+                        self.exportStatusMessage = "Completed"
+                        self.statusMessage = "Export completed"
+                    }
+                }
+            }
+        }
+    }
+
     public func timecode(_ seconds: TimeInterval) -> String {
         let totalFrames = Int((seconds * project.fps).rounded())
         let fps = max(1, Int(project.fps.rounded()))
@@ -477,62 +823,131 @@ public final class EditorWorkspace: ObservableObject {
         let hh = totalSeconds / 3600
         return String(format: "%02d:%02d:%02d:%02d", hh, mm, ss, frames)
     }
+
+    private func updateSelectedClip(_ mutation: (inout ClipRef) -> Void) {
+        guard let selectedClipID else { return }
+        guard let sequenceID = activeSequenceID ?? project.sequences.first?.id,
+              let sequenceIndex = project.sequences.firstIndex(where: { $0.id == sequenceID }) else { return }
+
+        var project = self.project
+        var updated = false
+
+        for trackIndex in project.sequences[sequenceIndex].videoTracks.indices {
+            if let clipIndex = project.sequences[sequenceIndex].videoTracks[trackIndex].clips.firstIndex(where: { $0.id == selectedClipID }) {
+                mutation(&project.sequences[sequenceIndex].videoTracks[trackIndex].clips[clipIndex])
+                updated = true
+                break
+            }
+        }
+
+        if !updated {
+            for trackIndex in project.sequences[sequenceIndex].audioTracks.indices {
+                if let clipIndex = project.sequences[sequenceIndex].audioTracks[trackIndex].clips.firstIndex(where: { $0.id == selectedClipID }) {
+                    mutation(&project.sequences[sequenceIndex].audioTracks[trackIndex].clips[clipIndex])
+                    updated = true
+                    break
+                }
+            }
+        }
+
+        guard updated else { return }
+        self.project = project
+    }
+
+    private func sanitizeSelectedClip() {
+        guard let selectedClipID else { return }
+        let existsInVideo = activeSequence?.videoTracks.contains(where: { track in
+            track.clips.contains(where: { $0.id == selectedClipID })
+        }) ?? false
+        let existsInAudio = activeSequence?.audioTracks.contains(where: { track in
+            track.clips.contains(where: { $0.id == selectedClipID })
+        }) ?? false
+
+        if !(existsInVideo || existsInAudio) {
+            self.selectedClipID = nil
+        }
+    }
 }
 
 public struct EditorRootView: View {
     @StateObject private var workspace = EditorWorkspace()
+    @State private var browserTab: BrowserTab = .libraries
+    @State private var inspectorTab: InspectorTab = .video
+    @State private var timelineZoom: Double = 1.0
+    @State private var draggingClipID: UUID?
+    @State private var dragTranslationX: CGFloat = 0
 
     public init() {}
+
+    private enum BrowserTab: String, CaseIterable, Identifiable {
+        case libraries = "Libraries"
+        case media = "Media"
+        case effects = "Effects"
+
+        var id: String { rawValue }
+    }
+
+    private enum InspectorTab: String, CaseIterable, Identifiable {
+        case video = "Video"
+        case audio = "Audio"
+        case info = "Info"
+
+        var id: String { rawValue }
+    }
 
     private var activeSequence: EditorSequence? {
         workspace.activeSequence
     }
 
+    private var videoClips: [ClipRef] {
+        activeSequence?.videoTracks
+            .flatMap(\.clips)
+            .sorted(by: { $0.timelineIn < $1.timelineIn }) ?? []
+    }
+
+    private var audioClips: [ClipRef] {
+        activeSequence?.audioTracks
+            .flatMap(\.clips)
+            .sorted(by: { $0.timelineIn < $1.timelineIn }) ?? []
+    }
+
     private var clipCount: Int {
-        activeSequence?.videoTracks.flatMap(\.clips).count ?? 0
-    }
-
-    private var hasImportedMedia: Bool {
-        !workspace.project.assets.isEmpty
-    }
-
-    private var quickStartProgress: Int {
-        [hasImportedMedia, clipCount > 0, workspace.lastAIArtifact != nil].filter { $0 }.count
+        videoClips.count
     }
 
     public var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.97, green: 0.98, blue: 0.96),
-                    Color(red: 0.94, green: 0.97, blue: 0.98)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            Color(red: 0.11, green: 0.11, blue: 0.12)
             .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                welcomeHeader
-                Divider()
-
                 HSplitView {
-                    leftRail
-                        .frame(minWidth: 300, idealWidth: 340)
+                    browserPanel
+                        .frame(minWidth: 250, idealWidth: 290, maxWidth: 360)
 
-                    VStack(spacing: 10) {
-                        actionDock
-                        viewersPanel
+                    VSplitView {
+                        VStack(spacing: 8) {
+                            topToolbar
+                            viewerWorkbench
+                        }
+                        .padding(8)
+                        .background(Color(red: 0.13, green: 0.13, blue: 0.14))
+                        .frame(minHeight: 360)
+
                         timelinePanel
+                            .frame(minHeight: 280)
+                            .background(Color(red: 0.15, green: 0.15, blue: 0.16))
                     }
-                    .padding(10)
-                }
 
-                Divider()
-                statusBar
+                    inspectorPanel
+                        .frame(minWidth: 250, idealWidth: 285, maxWidth: 340)
+                        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+                }
+                .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+
+                bottomBar
+                    .background(Color(red: 0.10, green: 0.10, blue: 0.11))
             }
-            .frame(minWidth: 1280, minHeight: 780)
-            .padding(8)
             .overlay(alignment: .topTrailing) {
                 if workspace.showsShortcutHelp {
                     shortcutsOverlay
@@ -540,6 +955,7 @@ public struct EditorRootView: View {
                 }
             }
         }
+        .frame(minWidth: 1400, minHeight: 860)
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.newProject)) { _ in
             workspace.createNewProject()
         }
@@ -561,6 +977,18 @@ public struct EditorRootView: View {
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.rippleDeleteFirstClip)) { _ in
             workspace.rippleDeleteFirstClip()
         }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.newSequence)) { _ in
+            workspace.createSequence()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.duplicateSequence)) { _ in
+            workspace.duplicateActiveSequence()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.addMarker)) { _ in
+            workspace.addMarkerAtPlayhead()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.nextMarker)) { _ in
+            workspace.jumpToNextMarker()
+        }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.toggleTimelineMode)) { _ in
             workspace.switchTimelineMode()
         }
@@ -569,379 +997,682 @@ public struct EditorRootView: View {
         }
     }
 
-    private var welcomeHeader: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Start Editing in 3 Simple Steps")
-                    .font(.system(size: 21, weight: .semibold, design: .rounded))
-                Text("Import clips, place your first shot, then export a creator preset.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            HStack(spacing: 8) {
-                Text("Progress \(quickStartProgress)/3")
-                    .font(.caption.bold())
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.white.opacity(0.8))
-                    .clipShape(Capsule())
-                Button("Shortcuts") { workspace.toggleShortcutHelp() }
-                    .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(14)
-        .background(
-            LinearGradient(
-                colors: [
-                    Color(red: 0.25, green: 0.59, blue: 0.48),
-                    Color(red: 0.20, green: 0.47, blue: 0.66)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
-        .foregroundStyle(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var leftRail: some View {
-        VStack(spacing: 10) {
-            quickStartCard
-            mediaBinCard
-        }
-        .padding(10)
-    }
-
-    private var quickStartCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Quick Start")
-                .font(.system(.title3, design: .rounded).weight(.semibold))
-
-            checklistRow(
-                title: "1. Import media",
-                hint: "Bring in clips you want to edit",
-                complete: hasImportedMedia,
-                actionTitle: "Import"
-            ) {
-                workspace.importMediaUsingDialog()
-            }
-
-            checklistRow(
-                title: "2. Add first clip",
-                hint: "Drop your first shot on timeline",
-                complete: clipCount > 0,
-                actionTitle: "Append"
-            ) {
-                workspace.appendFirstAssetToTimeline()
-            }
-
-            checklistRow(
-                title: "3. Try smart assist",
-                hint: "Generate captions or highlights",
-                complete: workspace.lastAIArtifact != nil,
-                actionTitle: "Auto Captions"
-            ) {
-                workspace.runAutoCaptions()
-            }
-
-            Button("Export Preview") {
-                workspace.enqueueExport()
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(Color(red: 0.90, green: 0.46, blue: 0.24))
-        }
-        .padding(12)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-    }
-
-    @ViewBuilder
-    private func checklistRow(
-        title: String,
-        hint: String,
-        complete: Bool,
-        actionTitle: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: complete ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(complete ? Color.green : Color.secondary)
-                .padding(.top, 2)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                Text(hint)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            Button(actionTitle) {
-                action()
-            }
-            .buttonStyle(.bordered)
-            .disabled(complete)
-        }
-    }
-
-    private var mediaBinCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private var browserPanel: some View {
+        VStack(spacing: 8) {
             HStack {
-                Text("Media Bin")
-                    .font(.system(.title3, design: .rounded).weight(.semibold))
+                Text("Browser")
+                    .font(.headline)
                 Spacer()
-                Button("Import") {
+                Button {
                     workspace.importMediaUsingDialog()
-                }
-            }
-
-            if workspace.project.assets.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("No media yet")
-                        .font(.subheadline.weight(.medium))
-                    Text("Click Import to add videos, audio, or images.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(10)
-                .background(Color.white.opacity(0.7))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            } else {
-                List {
-                    ForEach(workspace.project.assets) { asset in
-                        HStack {
-                            Image(systemName: symbol(for: asset.type))
-                                .foregroundStyle(Color(red: 0.19, green: 0.49, blue: 0.61))
-                            VStack(alignment: .leading) {
-                                Text(asset.name)
-                                Text("\(asset.type.rawValue.capitalized) • \(workspace.timecode(asset.duration))")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .padding(12)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var actionDock: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Actions")
-                .font(.system(.title3, design: .rounded).weight(.semibold))
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    actionTile("New", subtitle: "Fresh project", icon: "plus.square.fill", tint: Color(red: 0.27, green: 0.50, blue: 0.85)) {
-                        workspace.createNewProject()
-                    }
-                    actionTile("Open", subtitle: "Load bundle", icon: "folder.fill", tint: Color(red: 0.35, green: 0.56, blue: 0.39)) {
-                        workspace.openProjectUsingDialog()
-                    }
-                    actionTile("Save", subtitle: "Keep progress", icon: "square.and.arrow.down.fill", tint: Color(red: 0.49, green: 0.49, blue: 0.70)) {
-                        workspace.saveProject()
-                    }
-                    actionTile("Append Clip", subtitle: "Add first asset", icon: "film.stack.fill", tint: Color(red: 0.81, green: 0.49, blue: 0.27)) {
-                        workspace.appendFirstAssetToTimeline()
-                    }
-                    actionTile("Split", subtitle: "Cut at playhead", icon: "scissors", tint: Color(red: 0.66, green: 0.43, blue: 0.29)) {
-                        workspace.splitFirstClipAtPlayhead()
-                    }
-                    actionTile("Captions", subtitle: "Auto draft text", icon: "captions.bubble.fill", tint: Color(red: 0.26, green: 0.60, blue: 0.62)) {
-                        workspace.runAutoCaptions()
-                    }
-                    actionTile("Export", subtitle: "Share result", icon: "square.and.arrow.up.fill", tint: Color(red: 0.89, green: 0.40, blue: 0.26)) {
-                        workspace.enqueueExport()
-                    }
-                }
-            }
-        }
-        .padding(12)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var viewersPanel: some View {
-        HStack(spacing: 12) {
-            viewerCard(title: "Source Viewer")
-            viewerCard(title: "Program Viewer")
-        }
-    }
-
-    @ViewBuilder
-    private func actionTile(
-        _ title: String,
-        subtitle: String,
-        icon: String,
-        tint: Color,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 8) {
-                Image(systemName: icon)
-                    .font(.title3)
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                Text(subtitle)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(width: 118, alignment: .leading)
-            .padding(10)
-            .background(Color.white.opacity(0.85))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(tint.opacity(0.35), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(tint)
-    }
-
-    private func viewerCard(title: String) -> some View {
-        VStack(alignment: .leading) {
-            Text(title)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-
-            RoundedRectangle(cornerRadius: 10)
-                .fill(
-                    LinearGradient(
-                        colors: [Color.black.opacity(0.85), Color.black.opacity(0.65)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .overlay(
-                    VStack(spacing: 6) {
-                        Text("Playback Surface")
-                            .foregroundStyle(.white.opacity(0.85))
-                            .font(.caption)
-                        Text("Playhead: \(workspace.timecode(workspace.playheadTime))")
-                            .foregroundStyle(.white.opacity(0.75))
-                            .font(.caption2)
-                    }
-                )
-        }
-        .padding(12)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var timelinePanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Timeline")
-                    .font(.system(.title3, design: .rounded).weight(.semibold))
-                Spacer()
-                Text("Mode: \(workspace.activeSequence?.mode.rawValue.capitalized ?? "N/A")")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                Button("Switch Mode") {
-                    workspace.switchTimelineMode()
+                } label: {
+                    Label("Import", systemImage: "square.and.arrow.down.on.square.fill")
+                        .labelStyle(.titleAndIcon)
                 }
                 .buttonStyle(.bordered)
             }
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
 
-            if let sequence = activeSequence {
-                VStack(spacing: 6) {
-                    HStack {
-                        Text("Playhead")
+            Picker("Browser", selection: $browserTab) {
+                ForEach(BrowserTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 10)
+
+            if browserTab == .libraries || browserTab == .media {
+                if workspace.project.assets.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Image(systemName: "film.stack")
+                            .font(.title)
+                            .foregroundStyle(Color(red: 0.76, green: 0.76, blue: 0.80))
+                        Text("No media in browser")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                        Text("Import clips to start building your storyline.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Spacer()
-                        Text(workspace.timecode(workspace.playheadTime))
-                            .font(.caption.monospacedDigit())
-                    }
-
-                    Slider(
-                        value: Binding(
-                            get: { workspace.playheadTime },
-                            set: { workspace.updatePlayhead(to: $0) }
-                        ),
-                        in: 0...max(1.0, sequence.duration)
-                    )
-                }
-
-                if clipCount == 0 {
-                    HStack {
-                        Image(systemName: "sparkles.rectangle.stack")
-                            .foregroundStyle(Color(red: 0.23, green: 0.50, blue: 0.66))
-                        VStack(alignment: .leading) {
-                            Text("Timeline is empty")
-                                .font(.subheadline.weight(.semibold))
-                            Text("Use “Append Clip” above to place your first shot.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Append Now") {
-                            workspace.appendFirstAssetToTimeline()
+                        Button("Import Clips") {
+                            workspace.importMediaUsingDialog()
                         }
                         .buttonStyle(.borderedProminent)
                     }
-                    .padding(10)
-                    .background(Color.white.opacity(0.7))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(Color.white.opacity(0.06))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .padding(10)
                 } else {
-                    List {
-                        Section("Video Tracks") {
-                            ForEach(sequence.videoTracks) { track in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(trackSummary(track))
-                                    Text(clipSummary(track.clips))
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
+                    HStack {
+                        Button("Append Selected") {
+                            workspace.appendSelectedAssetToTimeline()
                         }
-                        Section("Audio Tracks") {
-                            ForEach(sequence.audioTracks) { track in
-                                Text(trackSummary(track))
+                        .buttonStyle(.borderedProminent)
+                        .disabled(workspace.selectedAssetID == nil)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.top, 2)
+
+                    List(workspace.project.assets) { asset in
+                        HStack(spacing: 8) {
+                            Image(systemName: symbol(for: asset.type))
+                                .foregroundStyle(.white.opacity(0.9))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(asset.name)
+                                    .foregroundStyle(.white)
+                                Text("\(asset.type.rawValue.capitalized) • \(workspace.timecode(asset.duration))")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
                             }
+                            Spacer()
+                        }
+                        .padding(.vertical, 2)
+                        .listRowBackground(
+                            workspace.selectedAssetID == asset.id ?
+                            Color.white.opacity(0.12) :
+                            Color.clear
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            workspace.selectAsset(asset.id)
+                        }
+                        .onTapGesture(count: 2) {
+                            workspace.selectAsset(asset.id)
+                            workspace.appendAssetToTimeline(assetID: asset.id)
                         }
                     }
                 }
             } else {
-                Text("No active sequence")
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    effectRow(name: "Basic Fade", detail: "Cross dissolve transition")
+                    effectRow(name: "Punch In", detail: "Scale + position keyframe")
+                    effectRow(name: "Voice Enhance", detail: "Noise reduction + EQ")
+                }
+                .padding(10)
             }
 
-            if let artifact = workspace.lastAIArtifact {
-                Text("Last AI: \(artifact.taskType.rawValue)")
+            Spacer()
+        }
+        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+    }
+
+    private var topToolbar: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text(workspace.project.name)
+                    .font(.headline)
+                    .foregroundStyle(.white)
+
+                if let url = workspace.currentProjectBundleURL {
+                    Text(url.lastPathComponent)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Unsaved")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                transportButtons
+            }
+
+            HStack(spacing: 8) {
+                toolbarButton("New", systemImage: "plus.square") { workspace.createNewProject() }
+                toolbarButton("Open", systemImage: "folder") { workspace.openProjectUsingDialog() }
+                toolbarButton("Save", systemImage: "square.and.arrow.down") { workspace.saveProject() }
+                Divider().frame(height: 18)
+                if !workspace.project.sequences.isEmpty {
+                    sequencePicker
+                }
+                toolbarButton("New Seq", systemImage: "plus.rectangle.on.folder") { workspace.createSequence() }
+                toolbarButton("Duplicate", systemImage: "doc.on.doc") { workspace.duplicateActiveSequence() }
+                Divider().frame(height: 18)
+                toolbarButton("Import", systemImage: "tray.and.arrow.down") { workspace.importMediaUsingDialog() }
+                toolbarButton("Append", systemImage: "plus.rectangle.on.rectangle") { workspace.appendSelectedAssetToTimeline() }
+                toolbarButton("Split", systemImage: "scissors") { workspace.splitFirstClipAtPlayhead() }
+                toolbarButton("Delete", systemImage: "delete.left") { workspace.rippleDeleteFirstClip() }
+                toolbarButton("Add Marker", systemImage: "bookmark") { workspace.addMarkerAtPlayhead() }
+                toolbarButton("Next Marker", systemImage: "arrow.right.to.line") { workspace.jumpToNextMarker() }
+                Divider().frame(height: 18)
+                toolbarButton("Nudge -", systemImage: "arrow.left") { workspace.nudgeSelectedClip(by: -0.5) }
+                toolbarButton("Nudge +", systemImage: "arrow.right") { workspace.nudgeSelectedClip(by: 0.5) }
+                toolbarButton("Trim In", systemImage: "arrow.right.to.line.compact") { workspace.trimSelectedClipLeading(by: 0.1) }
+                toolbarButton("Trim Out", systemImage: "arrow.left.to.line.compact") { workspace.trimSelectedClipTrailing(by: 0.1) }
+                toolbarButton("Delete Sel", systemImage: "trash") { workspace.rippleDeleteSelectedClip() }
+                Divider().frame(height: 18)
+                toolbarButton("Captions", systemImage: "captions.bubble") { workspace.runAutoCaptions() }
+                toolbarButton("Highlights", systemImage: "sparkles") { workspace.runHighlightSuggestions() }
+                toolbarButton("Export", systemImage: "square.and.arrow.up") { workspace.enqueueExport() }
+                if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
+                    toolbarButton("Cancel Export", systemImage: "xmark.circle") { workspace.cancelExport() }
+                }
+                Spacer()
+                Button("Mode: \(workspace.activeSequence?.mode.rawValue.capitalized ?? "N/A")") {
+                    workspace.switchTimelineMode()
+                }
+                .buttonStyle(.bordered)
+                .tint(Color(red: 0.43, green: 0.43, blue: 0.45))
+            }
+            .foregroundStyle(.white)
+        }
+        .padding(10)
+        .background(Color(red: 0.17, green: 0.17, blue: 0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var transportButtons: some View {
+        HStack(spacing: 6) {
+            tinyRoundButton("backward.end.fill")
+            tinyRoundButton("backward.fill")
+            tinyRoundButton("play.fill")
+            tinyRoundButton("forward.fill")
+            tinyRoundButton("forward.end.fill")
+            Spacer()
+            Text(workspace.timecode(workspace.playheadTime))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.white.opacity(0.85))
+        }
+    }
+
+    private var sequencePicker: some View {
+        Picker(
+            "Sequence",
+            selection: Binding(
+                get: { workspace.activeSequenceID ?? workspace.project.sequences.first?.id ?? UUID() },
+                set: { workspace.setActiveSequence($0) }
+            )
+        ) {
+            ForEach(workspace.project.sequences) { sequence in
+                Text(sequence.name).tag(sequence.id)
+            }
+        }
+        .pickerStyle(.menu)
+        .frame(maxWidth: 180)
+    }
+
+    private var viewerWorkbench: some View {
+        HStack(spacing: 8) {
+            viewerPanel(title: "Event Viewer", subtitle: "Source")
+            viewerPanel(title: "Project Viewer", subtitle: "Program")
+        }
+    }
+
+    private func viewerPanel(title: String, subtitle: String) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                tinyRoundButton("plus")
+                tinyRoundButton("minus")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(red: 0.18, green: 0.18, blue: 0.19))
+
+            ZStack {
+                Rectangle()
+                    .fill(Color.black.opacity(0.92))
+                VStack(spacing: 8) {
+                    Image(systemName: "play.rectangle")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.white.opacity(0.65))
+                    Text("Playhead \(workspace.timecode(workspace.playheadTime))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.65))
+                }
+            }
+            .frame(minHeight: 220)
+
+            HStack {
+                tinyRoundButton("gobackward.10")
+                tinyRoundButton("playpause.fill")
+                tinyRoundButton("goforward.10")
+                Spacer()
+                tinyRoundButton("speaker.wave.2.fill")
+                Slider(
+                    value: Binding(
+                        get: { workspace.playheadTime },
+                        set: { workspace.updatePlayhead(to: $0) }
+                    ),
+                    in: 0...max(1.0, activeSequence?.duration ?? 1.0)
+                )
+                .frame(maxWidth: 180)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(red: 0.18, green: 0.18, blue: 0.19))
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private var timelinePanel: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Timeline")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Text("Magnetic Mode")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text("Markers \(activeSequence?.markers.count ?? 0)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Slider(value: $timelineZoom, in: 0.6...2.2)
+                    .frame(width: 120)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(red: 0.19, green: 0.19, blue: 0.20))
+
+            if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
+                HStack(spacing: 8) {
+                    Text("Exporting")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    ProgressView(value: workspace.exportProgress)
+                    Text("\(Int(workspace.exportProgress * 100))%")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(red: 0.17, green: 0.17, blue: 0.18))
+            }
+
+            ScrollView([.vertical, .horizontal]) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Primary Storyline")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("Clips \(videoClips.count)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if videoClips.isEmpty {
+                        emptyTimelinePrompt
+                    } else {
+                        timelineTrack(clips: videoClips, tint: Color(red: 0.90, green: 0.52, blue: 0.28))
+                    }
+
+                    HStack {
+                        Text("Connected Audio")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("Clips \(audioClips.count)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    timelineTrack(clips: audioClips, tint: Color(red: 0.24, green: 0.62, blue: 0.76))
+                }
+                .padding(10)
+            }
+            .background(Color(red: 0.16, green: 0.16, blue: 0.17))
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var emptyTimelinePrompt: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Start your storyline")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                Text("Append your first clip to create a magnetic timeline.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Spacer()
+            Button("Append Clip") {
+                workspace.appendFirstAssetToTimeline()
+            }
+            .buttonStyle(.borderedProminent)
         }
         .padding(12)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private func trackSummary(_ track: TimelineTrack) -> String {
-        "\(track.name) • clips: \(track.clips.count)"
-    }
-
-    private func clipSummary(_ clips: [ClipRef]) -> String {
+    private func timelineTrack(clips: [ClipRef], tint: Color) -> some View {
         if clips.isEmpty {
-            return "No clips"
+            return AnyView(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.white.opacity(0.04))
+                    .frame(height: 36)
+            )
         }
 
-        return clips
-            .prefix(4)
-            .map { clip in
-                "\(workspace.timecode(clip.timelineIn)) (+\(workspace.timecode(clip.duration)))"
+        return AnyView(
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(clips) { clip in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(workspace.timecode(clip.timelineIn))
+                                .font(.caption2.monospacedDigit())
+                            Text("+\(workspace.timecode(clip.duration))")
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.75))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .frame(width: clipWidth(for: clip.duration), height: 36, alignment: .leading)
+                        .background(clipFillColor(for: clip, baseTint: tint))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(
+                                    workspace.selectedClipID == clip.id ? Color.white : Color.clear,
+                                    lineWidth: 1.6
+                                )
+                        )
+                        .offset(x: draggingClipID == clip.id ? dragTranslationX : 0)
+                        .onTapGesture {
+                            workspace.selectClip(clip.id)
+                        }
+                        .contextMenu {
+                            Button("Nudge Left") {
+                                workspace.selectClip(clip.id)
+                                workspace.nudgeSelectedClip(by: -0.5)
+                            }
+                            Button("Nudge Right") {
+                                workspace.selectClip(clip.id)
+                                workspace.nudgeSelectedClip(by: 0.5)
+                            }
+                            Divider()
+                            Button("Trim Start +0.1s") {
+                                workspace.selectClip(clip.id)
+                                workspace.trimSelectedClipLeading(by: 0.1)
+                            }
+                            Button("Trim End +0.1s") {
+                                workspace.selectClip(clip.id)
+                                workspace.trimSelectedClipTrailing(by: 0.1)
+                            }
+                            Divider()
+                            Button("Ripple Delete", role: .destructive) {
+                                workspace.selectClip(clip.id)
+                                workspace.rippleDeleteSelectedClip()
+                            }
+                        }
+                        .gesture(
+                            DragGesture(minimumDistance: 8)
+                                .onChanged { gesture in
+                                    workspace.selectClip(clip.id)
+                                    draggingClipID = clip.id
+                                    dragTranslationX = gesture.translation.width
+                                }
+                                .onEnded { gesture in
+                                    let seconds = Double(gesture.translation.width / max(30, (48 * timelineZoom)))
+                                    workspace.selectClip(clip.id)
+                                    workspace.nudgeSelectedClip(by: seconds)
+                                    draggingClipID = nil
+                                    dragTranslationX = 0
+                                }
+                        )
+                    }
+                }
             }
-            .joined(separator: "   ")
+        )
+    }
+
+    private func clipWidth(for duration: TimeInterval) -> CGFloat {
+        let width = 70 + (duration * 10 * timelineZoom)
+        return min(240, max(70, width))
+    }
+
+    private var inspectorPanel: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text("Inspector")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                Spacer()
+                tinyRoundButton("slider.horizontal.3")
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+
+            Picker("Inspector", selection: $inspectorTab) {
+                ForEach(InspectorTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 10)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if inspectorTab == .video {
+                        videoInspectorControls
+                    } else if inspectorTab == .audio {
+                        audioInspectorControls
+                    } else {
+                        inspectorGroup("Project", rows: [
+                            ("FPS", String(format: "%.0f", workspace.project.fps)),
+                            ("Color Space", workspace.project.colorSpace),
+                            ("Schema", "v\(workspace.project.schemaVersion)")
+                        ])
+                        inspectorGroup("Sequence", rows: [
+                            ("Video Clips", "\(videoClips.count)"),
+                            ("Audio Clips", "\(audioClips.count)"),
+                            ("Duration", workspace.timecode(activeSequence?.duration ?? 0)),
+                            ("Markers", "\(activeSequence?.markers.count ?? 0)")
+                        ])
+                        if let selectedClip = workspace.selectedClip {
+                            inspectorGroup("Selected Clip", rows: [
+                                ("ID", String(selectedClip.id.uuidString.prefix(8)) + "..."),
+                                ("Start", workspace.timecode(selectedClip.timelineIn)),
+                                ("Duration", workspace.timecode(selectedClip.duration))
+                            ])
+                        }
+                        inspectorGroup("Export Queue", rows: [
+                            ("Status", workspace.exportStatusMessage),
+                            ("Progress", "\(Int(workspace.exportProgress * 100))%"),
+                            ("Completed", "\(workspace.completedExports.count)")
+                        ])
+                    }
+
+                    if let artifact = workspace.lastAIArtifact {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Latest AI")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Text(artifact.taskType.rawValue)
+                                .foregroundStyle(.white)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(Color.white.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+                .padding(10)
+            }
+        }
+    }
+
+    private var videoInspectorControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if workspace.selectedClipTrackKind == .video, let clip = workspace.selectedClip {
+                sliderRow(
+                    title: "Position X",
+                    value: clip.transforms.positionX,
+                    range: -200...200
+                ) { workspace.updateSelectedClipPositionX($0) }
+
+                sliderRow(
+                    title: "Position Y",
+                    value: clip.transforms.positionY,
+                    range: -200...200
+                ) { workspace.updateSelectedClipPositionY($0) }
+
+                sliderRow(
+                    title: "Scale",
+                    value: clip.transforms.scaleX,
+                    range: 0.1...2.5
+                ) { workspace.updateSelectedClipScale($0) }
+
+                sliderRow(
+                    title: "Opacity",
+                    value: clip.transforms.opacity,
+                    range: 0...1
+                ) { workspace.updateSelectedClipOpacity($0) }
+            } else {
+                inspectorHint("Select a video clip in timeline to edit transform and opacity.")
+            }
+        }
+    }
+
+    private var audioInspectorControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if workspace.selectedClip != nil {
+                sliderRow(
+                    title: "Clip Gain",
+                    value: workspace.selectedClip?.gain ?? 1.0,
+                    range: 0...2
+                ) { workspace.updateSelectedClipGain($0) }
+                inspectorGroup("Audio Enhancements", rows: [
+                    ("Noise Removal", "Basic"),
+                    ("Ducking", "Voice Over")
+                ])
+            } else {
+                inspectorHint("Select any clip to edit gain.")
+            }
+        }
+    }
+
+    private func sliderRow(
+        title: String,
+        value: Double,
+        range: ClosedRange<Double>,
+        onChange: @escaping (Double) -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(String(format: "%.2f", value))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+
+            Slider(
+                value: Binding(
+                    get: { value },
+                    set: { onChange($0) }
+                ),
+                in: range
+            )
+        }
+        .padding(10)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func inspectorHint(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(Color.white.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func inspectorGroup(_ title: String, rows: [(String, String)]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            ForEach(rows, id: \.0) { row in
+                HStack {
+                    Text(row.0)
+                        .foregroundStyle(.white.opacity(0.9))
+                    Spacer()
+                    Text(row.1)
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
+            }
+        }
+        .padding(10)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func effectRow(name: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(name)
+                .foregroundStyle(.white)
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func clipFillColor(for clip: ClipRef, baseTint: Color) -> Color {
+        if workspace.selectedClipID == clip.id {
+            return baseTint.opacity(1.0)
+        }
+        return baseTint.opacity(0.78)
+    }
+
+    private func tinyRoundButton(_ systemImage: String) -> some View {
+        Button {
+            // Decorative transport/utility controls for the prototype shell.
+        } label: {
+            Image(systemName: systemImage)
+                .font(.caption.bold())
+                .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(0.8))
+        .background(
+            Circle()
+                .fill(Color.white.opacity(0.08))
+                .frame(width: 20, height: 20)
+        )
+    }
+
+    private func toolbarButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: systemImage)
+                Text(title)
+            }
+            .font(.caption)
+        }
+        .buttonStyle(.bordered)
+        .tint(Color(red: 0.40, green: 0.40, blue: 0.43))
     }
 
     private func symbol(for type: MediaAsset.AssetType) -> String {
@@ -957,11 +1688,11 @@ public struct EditorRootView: View {
         }
     }
 
-    private var statusBar: some View {
+    private var bottomBar: some View {
         HStack {
             Text(workspace.statusMessage)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.white.opacity(0.8))
             Spacer()
 
             if let autosaveURL = workspace.lastAutosaveURL {
@@ -969,6 +1700,16 @@ public struct EditorRootView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            if let sequence = workspace.activeSequence {
+                Text("Sequence: \(sequence.name)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Export: \(workspace.exportStatusMessage)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             Text("Shortcut Profile: Final Cut-like (simplified)")
                 .font(.caption)
@@ -982,6 +1723,7 @@ public struct EditorRootView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Keyboard Shortcuts")
                 .font(.headline)
+                .foregroundStyle(.white)
             Text("Cmd+N  New Project")
             Text("Cmd+O  Open Project")
             Text("Cmd+S  Save Project")
@@ -994,8 +1736,9 @@ public struct EditorRootView: View {
         }
         .font(.caption)
         .padding(10)
-        .background(.thinMaterial)
+        .background(Color.black.opacity(0.88))
         .cornerRadius(8)
         .shadow(radius: 8)
+        .foregroundStyle(.white.opacity(0.85))
     }
 }

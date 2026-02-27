@@ -74,6 +74,10 @@ let package = Package(
         .testTarget(
             name: "IOAdaptersTests",
             dependencies: ["IOAdapters", "ProjectCore"]
+        ),
+        .testTarget(
+            name: "AppShellTests",
+            dependencies: ["AppShell", "ProjectCore"]
         )
     ]
 )

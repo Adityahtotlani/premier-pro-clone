@@ -36,6 +36,11 @@ A macOS-first open-source non-linear editor prototype inspired by Premiere Pro a
   - media import dialog and proxy manifest generation
   - quick timeline edit actions (append first asset, split at playhead, ripple delete first clip)
   - keyboard command routing from app menus into the editor workspace
+- Expanded pro workflow features:
+  - multi-sequence create/duplicate/switch
+  - timeline marker add + jump-to-next-marker
+  - selectable timeline clips with live inspector editing (position/scale/opacity/gain)
+  - simulated export progress with status + completion history
 
 ## Run tests
 
