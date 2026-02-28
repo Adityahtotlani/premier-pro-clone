@@ -49,17 +49,29 @@ struct PremierCloneApplication: App {
             }
 
             CommandMenu("Edit") {
-                Button("Append First Asset") {
+                Button("Undo") {
+                    EditorCommand.post(EditorCommand.undo)
+                }
+                .keyboardShortcut("z", modifiers: .command)
+
+                Button("Redo") {
+                    EditorCommand.post(EditorCommand.redo)
+                }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+
+                Divider()
+
+                Button("Append Selected Asset") {
                     EditorCommand.post(EditorCommand.appendFirstAsset)
                 }
                 .keyboardShortcut("e", modifiers: .command)
 
-                Button("Split First Clip") {
+                Button("Split Selected Clip") {
                     EditorCommand.post(EditorCommand.splitFirstClip)
                 }
                 .keyboardShortcut("\\", modifiers: .command)
 
-                Button("Ripple Delete First Clip") {
+                Button("Ripple Delete Selected Clip") {
                     EditorCommand.post(EditorCommand.rippleDeleteFirstClip)
                 }
                 .keyboardShortcut(.delete, modifiers: [.command, .shift])
@@ -75,6 +87,23 @@ struct PremierCloneApplication: App {
                     EditorCommand.post(EditorCommand.duplicateSequence)
                 }
                 .keyboardShortcut("d", modifiers: [.command, .option])
+
+                Divider()
+
+                Button("Add Video Track") {
+                    EditorCommand.post(EditorCommand.addVideoTrack)
+                }
+                .keyboardShortcut("v", modifiers: [.command, .option, .shift])
+
+                Button("Add Audio Track") {
+                    EditorCommand.post(EditorCommand.addAudioTrack)
+                }
+                .keyboardShortcut("a", modifiers: [.command, .option, .shift])
+
+                Button("Toggle Insert/Overwrite") {
+                    EditorCommand.post(EditorCommand.toggleTimelineEditMode)
+                }
+                .keyboardShortcut("w", modifiers: [.command, .shift])
 
                 Divider()
 
@@ -96,7 +125,128 @@ struct PremierCloneApplication: App {
                 .keyboardShortcut("m", modifiers: [.command, .shift])
             }
 
+            CommandMenu("Playback") {
+                Button("Play/Pause") {
+                    EditorCommand.post(EditorCommand.playPause)
+                }
+                .keyboardShortcut(.space, modifiers: [])
+
+                Button("Step Backward Frame") {
+                    EditorCommand.post(EditorCommand.stepBackwardFrame)
+                }
+                .keyboardShortcut(",", modifiers: [])
+
+                Button("Step Forward Frame") {
+                    EditorCommand.post(EditorCommand.stepForwardFrame)
+                }
+                .keyboardShortcut(".", modifiers: [])
+
+                Divider()
+
+                Button("Shuttle Backward") {
+                    EditorCommand.post(EditorCommand.shuttleBackward)
+                }
+                .keyboardShortcut("j", modifiers: [])
+
+                Button("Shuttle Stop") {
+                    EditorCommand.post(EditorCommand.shuttleStop)
+                }
+                .keyboardShortcut("k", modifiers: [])
+
+                Button("Shuttle Forward") {
+                    EditorCommand.post(EditorCommand.shuttleForward)
+                }
+                .keyboardShortcut("l", modifiers: [])
+
+                Divider()
+
+                Button("Previous Edit Point") {
+                    EditorCommand.post(EditorCommand.previousEditPoint)
+                }
+                .keyboardShortcut(.leftArrow, modifiers: .option)
+
+                Button("Next Edit Point") {
+                    EditorCommand.post(EditorCommand.nextEditPoint)
+                }
+                .keyboardShortcut(.rightArrow, modifiers: .option)
+
+                Divider()
+
+                Button("Set In Point") {
+                    EditorCommand.post(EditorCommand.setInPoint)
+                }
+                .keyboardShortcut("i", modifiers: [])
+
+                Button("Set Out Point") {
+                    EditorCommand.post(EditorCommand.setOutPoint)
+                }
+                .keyboardShortcut("o", modifiers: [])
+
+                Button("Clear In/Out Points") {
+                    EditorCommand.post(EditorCommand.clearInOutPoints)
+                }
+                .keyboardShortcut("x", modifiers: [.command, .shift])
+
+                Button("Toggle Loop Playback") {
+                    EditorCommand.post(EditorCommand.toggleLoopPlayback)
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+
+                Divider()
+
+                Button("Go To Start") {
+                    EditorCommand.post(EditorCommand.jumpToStart)
+                }
+                .keyboardShortcut(.leftArrow, modifiers: .command)
+
+                Button("Go To End") {
+                    EditorCommand.post(EditorCommand.jumpToEnd)
+                }
+                .keyboardShortcut(.rightArrow, modifiers: .command)
+
+                Divider()
+
+                Button("Cycle Playback Speed") {
+                    EditorCommand.post(EditorCommand.cyclePlaybackRate)
+                }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
+
+                Button("Toggle Preview Mute") {
+                    EditorCommand.post(EditorCommand.togglePreviewMute)
+                }
+                .keyboardShortcut("u", modifiers: [.command, .shift])
+            }
+
             CommandMenu("View") {
+                Button("Toggle Browser Panel") {
+                    EditorCommand.post(EditorCommand.toggleBrowserPanel)
+                }
+                .keyboardShortcut("b", modifiers: [.command, .option])
+
+                Button("Toggle Inspector Panel") {
+                    EditorCommand.post(EditorCommand.toggleInspectorPanel)
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+
+                Divider()
+
+                Button("Editing Workspace") {
+                    EditorCommand.post(EditorCommand.applyEditingWorkspacePreset)
+                }
+                .keyboardShortcut("1", modifiers: [.command, .option])
+
+                Button("Focused Workspace") {
+                    EditorCommand.post(EditorCommand.applyFocusedWorkspacePreset)
+                }
+                .keyboardShortcut("2", modifiers: [.command, .option])
+
+                Button("Captions Workspace") {
+                    EditorCommand.post(EditorCommand.applyCaptionsWorkspacePreset)
+                }
+                .keyboardShortcut("3", modifiers: [.command, .option])
+
+                Divider()
+
                 Button("Toggle Shortcut Help") {
                     EditorCommand.post(EditorCommand.toggleShortcutHelp)
                 }

@@ -16,23 +16,35 @@ public struct MediaImportResult: Equatable, Sendable {
 }
 
 public final class MediaImporter {
-    public init() {}
+    private let fileManager: FileManager
+    private let stagingRootURL: URL
+
+    public init(
+        fileManager: FileManager = .default,
+        stagingRootURL: URL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PremierCloneImports", isDirectory: true)
+    ) {
+        self.fileManager = fileManager
+        self.stagingRootURL = stagingRootURL
+    }
 
     public func `import`(urls: [URL]) -> MediaImportResult {
         var assets: [MediaAsset] = []
         var warnings: [String] = []
 
         for url in urls {
-            guard FileManager.default.fileExists(atPath: url.path()) else {
-                warnings.append("Missing file at \(url.path())")
+            let sourceURL = url.standardizedFileURL
+            guard fileManager.fileExists(atPath: sourceURL.path()) else {
+                warnings.append("Missing file at \(sourceURL.path())")
                 continue
             }
 
-            let inferredType = inferAssetType(url: url)
-            let duration = loadDuration(url: url)
+            let ingestURL = stageImportedFileIfNeeded(sourceURL, warnings: &warnings)
+            let inferredType = inferAssetType(url: ingestURL)
+            let duration = loadDuration(url: ingestURL)
             let asset = MediaAsset(
-                name: url.deletingPathExtension().lastPathComponent,
-                path: url.path(),
+                name: sourceURL.deletingPathExtension().lastPathComponent,
+                path: ingestURL.path(),
                 type: inferredType,
                 duration: duration
             )
@@ -40,6 +52,44 @@ public final class MediaImporter {
         }
 
         return MediaImportResult(importedAssets: assets, warnings: warnings)
+    }
+
+    private func stageImportedFileIfNeeded(_ sourceURL: URL, warnings: inout [String]) -> URL {
+        do {
+            try ensureStagingDirectoryExists()
+            let destinationURL = stagedDestination(for: sourceURL)
+
+            if !fileManager.fileExists(atPath: destinationURL.path()) {
+                try fileManager.copyItem(at: sourceURL, to: destinationURL)
+            }
+
+            return destinationURL
+        } catch {
+            warnings.append("Using original path for \(sourceURL.lastPathComponent): \(error.localizedDescription)")
+            return sourceURL
+        }
+    }
+
+    private func ensureStagingDirectoryExists() throws {
+        if !fileManager.fileExists(atPath: stagingRootURL.path()) {
+            try fileManager.createDirectory(at: stagingRootURL, withIntermediateDirectories: true)
+        }
+    }
+
+    private func stagedDestination(for sourceURL: URL) -> URL {
+        let safeBase = sourceURL.deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: "[^A-Za-z0-9_-]+", with: "-", options: .regularExpression)
+        let ext = sourceURL.pathExtension.isEmpty ? "dat" : sourceURL.pathExtension.lowercased()
+        let signature = sourceSignature(for: sourceURL)
+        let filename = "\(safeBase)-\(signature).\(ext)"
+        return stagingRootURL.appendingPathComponent(filename, isDirectory: false)
+    }
+
+    private func sourceSignature(for sourceURL: URL) -> String {
+        let attributes = (try? fileManager.attributesOfItem(atPath: sourceURL.path())) ?? [:]
+        let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return "\(size)-\(Int(modified))"
     }
 
     private func inferAssetType(url: URL) -> MediaAsset.AssetType {
