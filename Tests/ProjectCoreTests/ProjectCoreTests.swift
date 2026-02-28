@@ -61,5 +61,66 @@ final class ProjectCoreTests: XCTestCase {
         let recovered = try store.recoverLatestAutosave(from: bundleURL)
         XCTAssertEqual(recovered?.name, project.name)
     }
+
+    func testDecodesProjectSettingsWithoutWorkspaceLayout() throws {
+        let json = """
+        {
+          "schemaVersion": 3,
+          "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "name": "Legacy Settings",
+          "fps": 30,
+          "colorSpace": "Rec.709",
+          "sequences": [],
+          "bins": [],
+          "assets": [],
+          "settings": {
+            "autosaveIntervalSeconds": 45,
+            "audioDuckingPresetEnabled": false,
+            "defaultQualityMode": "proxy"
+          },
+          "metadata": {
+            "migrationLog": [],
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z"
+          }
+        }
+        """.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let project = try decoder.decode(Project.self, from: json)
+
+        XCTAssertEqual(project.settings.autosaveIntervalSeconds, 45)
+        XCTAssertEqual(project.settings.defaultQualityMode, "proxy")
+        XCTAssertEqual(project.settings.workspaceLayout.preset, .editing)
+        XCTAssertTrue(project.settings.workspaceLayout.isBrowserPanelVisible)
+        XCTAssertTrue(project.settings.workspaceLayout.isInspectorPanelVisible)
+        XCTAssertEqual(project.settings.workspaceLayout.browserTab, .media)
+        XCTAssertEqual(project.settings.workspaceLayout.inspectorTab, .video)
+    }
+
+    func testSaveLoadPersistsWorkspaceLayoutSettings() throws {
+        var project = ProjectFactory.starterProject(name: "Workspace Layout", fps: 30)
+        project.settings.workspaceLayout = WorkspaceLayoutSettings(
+            preset: .captions,
+            isBrowserPanelVisible: true,
+            isInspectorPanelVisible: true,
+            browserTab: .timelineIndex,
+            inspectorTab: .captions
+        )
+
+        let store = ProjectStore()
+        let bundleURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PremierCloneLayout-\(UUID().uuidString)", isDirectory: true)
+
+        defer {
+            try? FileManager.default.removeItem(at: bundleURL)
+        }
+
+        try store.createProjectBundle(at: bundleURL, with: project)
+        let loaded = try store.load(from: bundleURL)
+
+        XCTAssertEqual(loaded.settings.workspaceLayout, project.settings.workspaceLayout)
+    }
 }
 #endif

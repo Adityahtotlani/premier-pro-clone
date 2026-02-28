@@ -39,7 +39,7 @@ A macOS-first open-source non-linear editor prototype inspired by Premiere Pro a
 - Expanded pro workflow features:
   - startup home screen before entering timeline workspace
   - adaptive window scaling: compact layout stacks viewers and keeps toolbars/status usable via horizontal overflow
-  - workspace layout system with Browser/Inspector panel toggles and Editing/Focused/Captions presets
+  - workspace layout system with Browser/Inspector panel toggles and Editing/Focused/Captions presets, persisted/restored via project settings
   - working quick actions for new/open/editor flow from home
   - multi-sequence create/duplicate/switch
   - timeline marker add + jump-to-next-marker

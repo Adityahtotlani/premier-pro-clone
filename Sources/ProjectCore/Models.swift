@@ -226,19 +226,88 @@ public struct EditorSequence: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public struct WorkspaceLayoutSettings: Codable, Equatable, Sendable {
+    public enum Preset: String, Codable, Sendable {
+        case editing
+        case focused
+        case captions
+        case custom
+    }
+
+    public enum BrowserTab: String, Codable, Sendable {
+        case libraries
+        case media
+        case timelineIndex
+        case effects
+    }
+
+    public enum InspectorTab: String, Codable, Sendable {
+        case video
+        case audio
+        case captions
+        case info
+    }
+
+    public var preset: Preset
+    public var isBrowserPanelVisible: Bool
+    public var isInspectorPanelVisible: Bool
+    public var browserTab: BrowserTab
+    public var inspectorTab: InspectorTab
+
+    public init(
+        preset: Preset = .editing,
+        isBrowserPanelVisible: Bool = true,
+        isInspectorPanelVisible: Bool = true,
+        browserTab: BrowserTab = .media,
+        inspectorTab: InspectorTab = .video
+    ) {
+        self.preset = preset
+        self.isBrowserPanelVisible = isBrowserPanelVisible
+        self.isInspectorPanelVisible = isInspectorPanelVisible
+        self.browserTab = browserTab
+        self.inspectorTab = inspectorTab
+    }
+}
+
 public struct ProjectSettings: Codable, Equatable, Sendable {
     public var autosaveIntervalSeconds: Int
     public var audioDuckingPresetEnabled: Bool
     public var defaultQualityMode: String
+    public var workspaceLayout: WorkspaceLayoutSettings
 
     public init(
         autosaveIntervalSeconds: Int = 30,
         audioDuckingPresetEnabled: Bool = true,
-        defaultQualityMode: String = "full"
+        defaultQualityMode: String = "full",
+        workspaceLayout: WorkspaceLayoutSettings = WorkspaceLayoutSettings()
     ) {
         self.autosaveIntervalSeconds = autosaveIntervalSeconds
         self.audioDuckingPresetEnabled = audioDuckingPresetEnabled
         self.defaultQualityMode = defaultQualityMode
+        self.workspaceLayout = workspaceLayout
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case autosaveIntervalSeconds
+        case audioDuckingPresetEnabled
+        case defaultQualityMode
+        case workspaceLayout
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        autosaveIntervalSeconds = try container.decodeIfPresent(Int.self, forKey: .autosaveIntervalSeconds) ?? 30
+        audioDuckingPresetEnabled = try container.decodeIfPresent(Bool.self, forKey: .audioDuckingPresetEnabled) ?? true
+        defaultQualityMode = try container.decodeIfPresent(String.self, forKey: .defaultQualityMode) ?? "full"
+        workspaceLayout = try container.decodeIfPresent(WorkspaceLayoutSettings.self, forKey: .workspaceLayout) ?? WorkspaceLayoutSettings()
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(autosaveIntervalSeconds, forKey: .autosaveIntervalSeconds)
+        try container.encode(audioDuckingPresetEnabled, forKey: .audioDuckingPresetEnabled)
+        try container.encode(defaultQualityMode, forKey: .defaultQualityMode)
+        try container.encode(workspaceLayout, forKey: .workspaceLayout)
     }
 }
 

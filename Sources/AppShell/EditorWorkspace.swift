@@ -193,6 +193,14 @@ public final class EditorWorkspace: ObservableObject {
         return project.sequences.first
     }
 
+    public var workspaceLayoutSettings: WorkspaceLayoutSettings {
+        project.settings.workspaceLayout
+    }
+
+    public func updateWorkspaceLayoutSettings(_ settings: WorkspaceLayoutSettings) {
+        project.settings.workspaceLayout = settings
+    }
+
     public var canUndo: Bool {
         !undoHistory.isEmpty
     }
@@ -2488,6 +2496,7 @@ public struct EditorRootView: View {
     @State private var isBrowserPanelVisible = true
     @State private var isInspectorPanelVisible = true
     @State private var workspacePreset: WorkspacePreset = .editing
+    @State private var isRestoringWorkspaceLayout = false
     @State private var timelineZoom: Double = 1.0
     @State private var sourceViewerZoom: Double = 1.0
     @State private var programViewerZoom: Double = 1.0
@@ -2861,6 +2870,15 @@ public struct EditorRootView: View {
             enterEditor()
             applyWorkspacePreset(.captions)
         }
+        .onAppear {
+            restoreWorkspaceLayoutFromProject()
+        }
+        .onChange(of: workspace.project.id) { _ in
+            restoreWorkspaceLayoutFromProject()
+        }
+        .onChange(of: workspace.currentProjectBundleURL) { _ in
+            restoreWorkspaceLayoutFromProject()
+        }
         .onChange(of: browserTab) { _ in
             syncWorkspacePreset()
         }
@@ -2871,41 +2889,73 @@ public struct EditorRootView: View {
 
     private func editorWorkspace(compact: Bool, narrow: Bool) -> some View {
         VStack(spacing: 0) {
-            HSplitView {
-                if isBrowserPanelVisible {
-                    browserPanel
-                        .frame(
-                            minWidth: narrow ? 145 : 210,
-                            idealWidth: compact ? 220 : 290,
-                            maxWidth: compact ? 300 : 360
-                        )
-                }
-
-                VSplitView {
-                    VStack(spacing: 8) {
-                        topToolbar(compact: compact)
-                        viewerWorkbench(stacked: compact && (isBrowserPanelVisible || isInspectorPanelVisible))
+            ZStack(alignment: .top) {
+                HSplitView {
+                    if isBrowserPanelVisible {
+                        browserPanel
+                            .frame(
+                                minWidth: narrow ? 145 : 210,
+                                idealWidth: compact ? 220 : 290,
+                                maxWidth: compact ? 300 : 360
+                            )
                     }
-                    .padding(8)
-                    .background(Color(red: 0.13, green: 0.13, blue: 0.14))
-                    .frame(minHeight: compact ? 300 : 360)
 
-                    timelinePanel
-                        .frame(minHeight: compact ? 240 : 280)
-                        .background(Color(red: 0.15, green: 0.15, blue: 0.16))
+                    VSplitView {
+                        VStack(spacing: 8) {
+                            topToolbar(compact: compact)
+                            viewerWorkbench(stacked: compact && (isBrowserPanelVisible || isInspectorPanelVisible))
+                        }
+                        .padding(8)
+                        .background(Color(red: 0.13, green: 0.13, blue: 0.14))
+                        .frame(minHeight: compact ? 300 : 360)
+
+                        timelinePanel
+                            .frame(minHeight: compact ? 240 : 280)
+                            .background(Color(red: 0.15, green: 0.15, blue: 0.16))
+                    }
+
+                    if isInspectorPanelVisible {
+                        inspectorPanel
+                            .frame(
+                                minWidth: narrow ? 145 : 210,
+                                idealWidth: compact ? 220 : 285,
+                                maxWidth: compact ? 290 : 340
+                            )
+                            .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+                    }
                 }
+                .background(Color(red: 0.12, green: 0.12, blue: 0.13))
 
-                if isInspectorPanelVisible {
-                    inspectorPanel
-                        .frame(
-                            minWidth: narrow ? 145 : 210,
-                            idealWidth: compact ? 220 : 285,
-                            maxWidth: compact ? 290 : 340
-                        )
-                        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+                if !isBrowserPanelVisible || !isInspectorPanelVisible {
+                    HStack {
+                        if !isBrowserPanelVisible {
+                            Button {
+                                toggleBrowserPanelVisibility()
+                            } label: {
+                                Label("Show Browser", systemImage: "sidebar.left")
+                                    .font(.caption.weight(.semibold))
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Color(red: 0.33, green: 0.33, blue: 0.36))
+                        }
+
+                        Spacer()
+
+                        if !isInspectorPanelVisible {
+                            Button {
+                                toggleInspectorPanelVisibility()
+                            } label: {
+                                Label("Show Inspector", systemImage: "sidebar.right")
+                                    .font(.caption.weight(.semibold))
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Color(red: 0.33, green: 0.33, blue: 0.36))
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.top, 10)
                 }
             }
-            .background(Color(red: 0.12, green: 0.12, blue: 0.13))
 
             bottomBar
                 .background(Color(red: 0.10, green: 0.10, blue: 0.11))
@@ -3068,7 +3118,7 @@ public struct EditorRootView: View {
         case .custom:
             break
         }
-        workspacePreset = preset
+        syncWorkspacePreset()
     }
 
     private func syncWorkspacePreset() {
@@ -3078,15 +3128,118 @@ public struct EditorRootView: View {
             } else {
                 workspacePreset = .editing
             }
-            return
-        }
-
-        if !isBrowserPanelVisible && !isInspectorPanelVisible {
+        } else if !isBrowserPanelVisible && !isInspectorPanelVisible {
             workspacePreset = .focused
-            return
+        } else {
+            workspacePreset = .custom
         }
+        persistWorkspaceLayout()
+    }
 
-        workspacePreset = .custom
+    private func restoreWorkspaceLayoutFromProject() {
+        let stored = workspace.workspaceLayoutSettings
+        isRestoringWorkspaceLayout = true
+        isBrowserPanelVisible = stored.isBrowserPanelVisible
+        isInspectorPanelVisible = stored.isInspectorPanelVisible
+        browserTab = browserTab(from: stored.browserTab)
+        inspectorTab = inspectorTab(from: stored.inspectorTab)
+        workspacePreset = workspacePreset(from: stored.preset)
+        syncWorkspacePreset()
+        isRestoringWorkspaceLayout = false
+    }
+
+    private func persistWorkspaceLayout() {
+        guard !isRestoringWorkspaceLayout else { return }
+
+        let persistedSettings = WorkspaceLayoutSettings(
+            preset: storedPreset(from: workspacePreset),
+            isBrowserPanelVisible: isBrowserPanelVisible,
+            isInspectorPanelVisible: isInspectorPanelVisible,
+            browserTab: storedBrowserTab(from: browserTab),
+            inspectorTab: storedInspectorTab(from: inspectorTab)
+        )
+
+        if workspace.workspaceLayoutSettings != persistedSettings {
+            workspace.updateWorkspaceLayoutSettings(persistedSettings)
+        }
+    }
+
+    private func storedPreset(from preset: WorkspacePreset) -> WorkspaceLayoutSettings.Preset {
+        switch preset {
+        case .editing:
+            return .editing
+        case .focused:
+            return .focused
+        case .captions:
+            return .captions
+        case .custom:
+            return .custom
+        }
+    }
+
+    private func workspacePreset(from preset: WorkspaceLayoutSettings.Preset) -> WorkspacePreset {
+        switch preset {
+        case .editing:
+            return .editing
+        case .focused:
+            return .focused
+        case .captions:
+            return .captions
+        case .custom:
+            return .custom
+        }
+    }
+
+    private func storedBrowserTab(from tab: BrowserTab) -> WorkspaceLayoutSettings.BrowserTab {
+        switch tab {
+        case .libraries:
+            return .libraries
+        case .media:
+            return .media
+        case .timelineIndex:
+            return .timelineIndex
+        case .effects:
+            return .effects
+        }
+    }
+
+    private func browserTab(from tab: WorkspaceLayoutSettings.BrowserTab) -> BrowserTab {
+        switch tab {
+        case .libraries:
+            return .libraries
+        case .media:
+            return .media
+        case .timelineIndex:
+            return .timelineIndex
+        case .effects:
+            return .effects
+        }
+    }
+
+    private func storedInspectorTab(from tab: InspectorTab) -> WorkspaceLayoutSettings.InspectorTab {
+        switch tab {
+        case .video:
+            return .video
+        case .audio:
+            return .audio
+        case .captions:
+            return .captions
+        case .info:
+            return .info
+        }
+    }
+
+    private func inspectorTab(from tab: WorkspaceLayoutSettings.InspectorTab) -> InspectorTab {
+        switch tab {
+        case .video:
+            return .video
+        case .audio:
+            return .audio
+        case .captions:
+            return .captions
+        case .info:
+            return .info
+        }
     }
 
     private func homeCard(title: String, detail: String) -> some View {
