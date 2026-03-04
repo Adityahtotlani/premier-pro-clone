@@ -24,6 +24,8 @@ public enum EditorCommand {
     public static let newProject = Notification.Name("EditorCommand.newProject")
     public static let openProject = Notification.Name("EditorCommand.openProject")
     public static let saveProject = Notification.Name("EditorCommand.saveProject")
+    public static let exportCSVReport = Notification.Name("EditorCommand.exportCSVReport")
+    public static let exportPDFReport = Notification.Name("EditorCommand.exportPDFReport")
     public static let importMedia = Notification.Name("EditorCommand.importMedia")
     public static let appendFirstAsset = Notification.Name("EditorCommand.appendFirstAsset")
     public static let splitFirstClip = Notification.Name("EditorCommand.splitFirstClip")
@@ -44,6 +46,9 @@ public enum EditorCommand {
     public static let applyEditingWorkspacePreset = Notification.Name("EditorCommand.applyEditingWorkspacePreset")
     public static let applyFocusedWorkspacePreset = Notification.Name("EditorCommand.applyFocusedWorkspacePreset")
     public static let applyCaptionsWorkspacePreset = Notification.Name("EditorCommand.applyCaptionsWorkspacePreset")
+    public static let moveInspectorLeft = Notification.Name("EditorCommand.moveInspectorLeft")
+    public static let moveInspectorRight = Notification.Name("EditorCommand.moveInspectorRight")
+    public static let resetWorkspaceLayout = Notification.Name("EditorCommand.resetWorkspaceLayout")
     public static let playPause = Notification.Name("EditorCommand.playPause")
     public static let jumpToStart = Notification.Name("EditorCommand.jumpToStart")
     public static let jumpToEnd = Notification.Name("EditorCommand.jumpToEnd")
@@ -1004,23 +1009,114 @@ public final class EditorWorkspace: ObservableObject {
         statusMessage = "Export cancelled"
     }
 
+    public func csvReportContent() -> String? {
+        guard let sequence = activeSequence else { return nil }
+        return buildCSVReport(for: sequence)
+    }
+
+    public func pdfReportText() -> String? {
+        guard let sequence = activeSequence else { return nil }
+        return buildTextReport(for: sequence)
+    }
+
+    public func exportCSVReportUsingDialog() {
+        #if canImport(AppKit)
+        guard let sequence = activeSequence else {
+            statusMessage = "No active sequence to report"
+            return
+        }
+        let content = buildCSVReport(for: sequence)
+        guard let data = content.data(using: .utf8) else {
+            statusMessage = "Could not encode CSV report"
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "\(defaultReportFileStem(for: sequence)).csv"
+        panel.message = "Choose where to export the CSV report"
+        #if canImport(UniformTypeIdentifiers)
+        if #available(macOS 11.0, *) {
+            panel.allowedContentTypes = [.commaSeparatedText]
+        }
+        #endif
+
+        if panel.runModal() == .OK, let chosenURL = panel.url {
+            let outputURL = reportURL(from: chosenURL, expectedExtension: "csv")
+            do {
+                try data.write(to: outputURL, options: .atomic)
+                statusMessage = "Exported CSV report \(outputURL.lastPathComponent)"
+            } catch {
+                statusMessage = "CSV export failed: \(error.localizedDescription)"
+            }
+        }
+        #else
+        statusMessage = "CSV export is only available on macOS"
+        #endif
+    }
+
+    public func exportPDFReportUsingDialog() {
+        #if canImport(AppKit)
+        guard let sequence = activeSequence else {
+            statusMessage = "No active sequence to report"
+            return
+        }
+        let reportText = buildTextReport(for: sequence)
+        guard let data = buildPDFReportData(from: reportText) else {
+            statusMessage = "Could not render PDF report"
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "\(defaultReportFileStem(for: sequence)).pdf"
+        panel.message = "Choose where to export the PDF report"
+        #if canImport(UniformTypeIdentifiers)
+        if #available(macOS 11.0, *) {
+            panel.allowedContentTypes = [.pdf]
+        }
+        #endif
+
+        if panel.runModal() == .OK, let chosenURL = panel.url {
+            let outputURL = reportURL(from: chosenURL, expectedExtension: "pdf")
+            do {
+                try data.write(to: outputURL, options: .atomic)
+                statusMessage = "Exported PDF report \(outputURL.lastPathComponent)"
+            } catch {
+                statusMessage = "PDF export failed: \(error.localizedDescription)"
+            }
+        }
+        #else
+        statusMessage = "PDF export is only available on macOS"
+        #endif
+    }
+
     public func importMedia(urls: [URL]) {
         let result = mediaImporter.import(urls: urls)
         guard !result.importedAssets.isEmpty else {
             statusMessage = result.warnings.isEmpty ? "No files imported" : result.warnings.joined(separator: " | ")
             return
         }
-        recordUndoSnapshot()
 
         var updatedAssets = project.assets
-        var insertedCount = 0
+        var insertedAssets: [MediaAsset] = []
 
         for asset in result.importedAssets {
             if !updatedAssets.contains(where: { $0.path == asset.path }) {
                 updatedAssets.append(asset)
-                insertedCount += 1
+                insertedAssets.append(asset)
             }
         }
+
+        guard !insertedAssets.isEmpty else {
+            let duplicateMessage = "All selected files are already in the browser"
+            statusMessage = result.warnings.isEmpty ?
+                duplicateMessage :
+                "\(duplicateMessage) | \(result.warnings.joined(separator: " | "))"
+            return
+        }
+
+        recordUndoSnapshot()
 
         var updatedProject = project
         updatedProject.assets = updatedAssets
@@ -1029,20 +1125,122 @@ public final class EditorWorkspace: ObservableObject {
             updatedProject.bins = [MediaBin(name: "Imported")]
         }
 
-        for index in updatedProject.bins.indices {
-            var ids = Set(updatedProject.bins[index].assetIDs)
-            for asset in result.importedAssets {
-                ids.insert(asset.id)
+        if let importedBinIndex = updatedProject.bins.firstIndex(where: {
+            $0.name.compare("Imported", options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }) ?? updatedProject.bins.indices.first {
+            var ids = updatedProject.bins[importedBinIndex].assetIDs
+            for asset in insertedAssets where !ids.contains(asset.id) {
+                ids.append(asset.id)
             }
-            updatedProject.bins[index].assetIDs = Array(ids)
+            updatedProject.bins[importedBinIndex].assetIDs = ids
         }
 
         project = updatedProject
-        if selectedAssetID == nil, let firstImported = result.importedAssets.first {
+        if selectedAssetID == nil, let firstImported = insertedAssets.first {
             selectAsset(firstImported.id)
         }
         sanitizeSelectedClip()
-        statusMessage = "Imported \(insertedCount) assets"
+        let duplicateCount = max(0, result.importedAssets.count - insertedAssets.count)
+        var message = "Imported \(insertedAssets.count) assets"
+        if duplicateCount > 0 {
+            message += " (\(duplicateCount) already in browser)"
+        }
+        if !result.warnings.isEmpty {
+            message += " | \(result.warnings.joined(separator: " | "))"
+        }
+        statusMessage = message
+    }
+
+    public func createBin(named proposedName: String? = nil) {
+        let baseName = sanitizeBinName(proposedName) ?? "Bin"
+        let uniqueName = uniqueBinName(from: baseName)
+
+        recordUndoSnapshot()
+        var updatedProject = project
+        updatedProject.bins.append(MediaBin(name: uniqueName))
+        project = updatedProject
+        statusMessage = "Created bin \(uniqueName)"
+    }
+
+    public func renameBin(binID: UUID, to proposedName: String) {
+        guard let binIndex = project.bins.firstIndex(where: { $0.id == binID }) else {
+            statusMessage = "Bin not found"
+            return
+        }
+        guard let sanitized = sanitizeBinName(proposedName) else {
+            statusMessage = "Bin name cannot be empty"
+            return
+        }
+
+        let originalName = project.bins[binIndex].name
+        let uniqueName = uniqueBinName(from: sanitized, excluding: binID)
+        guard originalName != uniqueName else {
+            statusMessage = "Bin name unchanged"
+            return
+        }
+
+        recordUndoSnapshot()
+        var updatedProject = project
+        updatedProject.bins[binIndex].name = uniqueName
+        project = updatedProject
+        statusMessage = "Renamed bin to \(uniqueName)"
+    }
+
+    public func deleteBin(binID: UUID) {
+        guard let binIndex = project.bins.firstIndex(where: { $0.id == binID }) else {
+            statusMessage = "Bin not found"
+            return
+        }
+
+        recordUndoSnapshot()
+        var updatedProject = project
+        let removedName = updatedProject.bins[binIndex].name
+        updatedProject.bins.remove(at: binIndex)
+        if updatedProject.bins.isEmpty {
+            updatedProject.bins = [MediaBin(name: "Imported")]
+        }
+        project = updatedProject
+        statusMessage = "Deleted bin \(removedName)"
+    }
+
+    public func addAsset(_ assetID: UUID, toBin binID: UUID) {
+        guard project.assets.contains(where: { $0.id == assetID }) else {
+            statusMessage = "Asset not found"
+            return
+        }
+        guard let binIndex = project.bins.firstIndex(where: { $0.id == binID }) else {
+            statusMessage = "Bin not found"
+            return
+        }
+        guard !project.bins[binIndex].assetIDs.contains(assetID) else {
+            statusMessage = "Asset already in \(project.bins[binIndex].name)"
+            return
+        }
+
+        recordUndoSnapshot()
+        var updatedProject = project
+        updatedProject.bins[binIndex].assetIDs.append(assetID)
+        let binName = updatedProject.bins[binIndex].name
+        project = updatedProject
+        statusMessage = "Added asset to \(binName)"
+    }
+
+    public func removeAsset(_ assetID: UUID, fromBin binID: UUID) {
+        guard let binIndex = project.bins.firstIndex(where: { $0.id == binID }) else {
+            statusMessage = "Bin not found"
+            return
+        }
+        guard let assetIndex = project.bins[binIndex].assetIDs.firstIndex(of: assetID) else {
+            statusMessage = "Asset is not in \(project.bins[binIndex].name)"
+            return
+        }
+
+        recordUndoSnapshot()
+        var updatedProject = project
+        updatedProject.bins[binIndex].assetIDs.remove(at: assetIndex)
+        let binName = updatedProject.bins[binIndex].name
+        project = updatedProject
+        statusMessage = "Removed asset from \(binName)"
     }
 
     public func selectClip(_ clipID: UUID?) {
@@ -2194,6 +2392,292 @@ public final class EditorWorkspace: ObservableObject {
         return SourceInsertionRange(inTime: start, outTime: end, usesMarkedRange: true)
     }
 
+    private func sanitizeBinName(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func normalizedBinNameKey(_ name: String) -> String {
+        name.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: Locale.current
+        )
+    }
+
+    private func uniqueBinName(from base: String, excluding excludedBinID: UUID? = nil) -> String {
+        let baseName = sanitizeBinName(base) ?? "Bin"
+        let existingNames = Set(
+            project.bins
+                .filter { $0.id != excludedBinID }
+                .map { normalizedBinNameKey($0.name) }
+        )
+        var candidate = baseName
+        var suffix = 2
+        while existingNames.contains(normalizedBinNameKey(candidate)) {
+            candidate = "\(baseName) \(suffix)"
+            suffix += 1
+        }
+        return candidate
+    }
+
+    private struct ClipReportEntry {
+        var clip: ClipRef
+        var track: TimelineTrack
+        var kind: TrackKind
+    }
+
+    private func clipReportEntries(for sequence: EditorSequence) -> [ClipReportEntry] {
+        var entries: [ClipReportEntry] = []
+
+        for track in sequence.videoTracks {
+            for clip in track.clips {
+                entries.append(ClipReportEntry(clip: clip, track: track, kind: .video))
+            }
+        }
+
+        for track in sequence.audioTracks {
+            for clip in track.clips {
+                entries.append(ClipReportEntry(clip: clip, track: track, kind: .audio))
+            }
+        }
+
+        return entries.sorted {
+            if $0.clip.timelineIn == $1.clip.timelineIn {
+                if $0.kind == $1.kind {
+                    return $0.track.name.localizedCaseInsensitiveCompare($1.track.name) == .orderedAscending
+                }
+                return $0.kind == .video
+            }
+            return $0.clip.timelineIn < $1.clip.timelineIn
+        }
+    }
+
+    private func buildCSVReport(for sequence: EditorSequence) -> String {
+        let assetLookup = Dictionary(uniqueKeysWithValues: project.assets.map { ($0.id, $0) })
+        let markers = sequence.markers.sorted(by: { $0.time < $1.time })
+        let captions = sequence.captionTracks.flatMap(\.segments).sorted(by: { $0.start < $1.start })
+        let clipEntries = clipReportEntries(for: sequence)
+
+        var rows: [String] = []
+        rows.append("section,key,value")
+        rows.append(csvRow(["summary", "project_name", project.name]))
+        rows.append(csvRow(["summary", "project_id", project.id.uuidString]))
+        rows.append(csvRow(["summary", "sequence_name", sequence.name]))
+        rows.append(csvRow(["summary", "sequence_id", sequence.id.uuidString]))
+        rows.append(csvRow(["summary", "sequence_mode", sequence.mode.rawValue]))
+        rows.append(csvRow(["summary", "fps", decimalString(project.fps)]))
+        rows.append(csvRow(["summary", "duration_seconds", decimalString(sequence.duration)]))
+        rows.append(csvRow(["summary", "video_track_count", "\(sequence.videoTracks.count)"]))
+        rows.append(csvRow(["summary", "audio_track_count", "\(sequence.audioTracks.count)"]))
+        rows.append(csvRow(["summary", "clip_count", "\(clipEntries.count)"]))
+        rows.append(csvRow(["summary", "marker_count", "\(markers.count)"]))
+        rows.append(csvRow(["summary", "caption_count", "\(captions.count)"]))
+        rows.append("")
+
+        rows.append("clip_id,asset_id,asset_name,asset_type,track_kind,track_name,track_muted,track_solo,track_locked,timeline_in,timeline_out,clip_duration,source_in,source_out,gain,position_x,position_y,scale_x,scale_y,opacity,effects_count,linked_audio_count")
+        for entry in clipEntries {
+            let asset = assetLookup[entry.clip.assetID]
+            let timelineOut = entry.clip.timelineIn + entry.clip.duration
+            rows.append(
+                csvRow([
+                    entry.clip.id.uuidString,
+                    entry.clip.assetID.uuidString,
+                    asset?.name ?? "Missing Asset",
+                    asset?.type.rawValue ?? "unknown",
+                    entry.kind.rawValue,
+                    entry.track.name,
+                    boolString(entry.track.isMuted),
+                    boolString(entry.track.isSolo),
+                    boolString(isTrackLocked(entry.track.id)),
+                    decimalString(entry.clip.timelineIn),
+                    decimalString(timelineOut),
+                    decimalString(entry.clip.duration),
+                    decimalString(entry.clip.inTime),
+                    decimalString(entry.clip.outTime),
+                    decimalString(entry.clip.gain),
+                    decimalString(entry.clip.transforms.positionX),
+                    decimalString(entry.clip.transforms.positionY),
+                    decimalString(entry.clip.transforms.scaleX),
+                    decimalString(entry.clip.transforms.scaleY),
+                    decimalString(entry.clip.transforms.opacity),
+                    "\(entry.clip.effects.count)",
+                    "\(entry.clip.linkedAudioIDs.count)"
+                ])
+            )
+        }
+        rows.append("")
+
+        rows.append("marker_id,time_seconds,label")
+        for marker in markers {
+            rows.append(csvRow([marker.id.uuidString, decimalString(marker.time), marker.label]))
+        }
+        rows.append("")
+
+        rows.append("caption_id,start_seconds,end_seconds,confidence,text")
+        for segment in captions {
+            rows.append(
+                csvRow([
+                    segment.id.uuidString,
+                    decimalString(segment.start),
+                    decimalString(segment.end),
+                    decimalString(segment.confidence),
+                    segment.text
+                ])
+            )
+        }
+
+        return rows.joined(separator: "\n")
+    }
+
+    private func buildTextReport(for sequence: EditorSequence) -> String {
+        let assetLookup = Dictionary(uniqueKeysWithValues: project.assets.map { ($0.id, $0) })
+        let clipEntries = clipReportEntries(for: sequence)
+        let markers = sequence.markers.sorted(by: { $0.time < $1.time })
+        let captions = sequence.captionTracks.flatMap(\.segments).sorted(by: { $0.start < $1.start })
+
+        var lines: [String] = []
+        lines.append("PremierClone Sequence Report")
+        lines.append("Generated: \(ISO8601DateFormatter().string(from: Date()))")
+        lines.append("")
+        lines.append("Project: \(project.name) (\(project.id.uuidString))")
+        lines.append("Sequence: \(sequence.name) (\(sequence.id.uuidString))")
+        lines.append("Mode: \(sequence.mode.rawValue.capitalized)")
+        lines.append("FPS: \(decimalString(project.fps))")
+        lines.append("Duration: \(timecode(sequence.duration))")
+        lines.append("Video Tracks: \(sequence.videoTracks.count), Audio Tracks: \(sequence.audioTracks.count)")
+        lines.append("Clips: \(clipEntries.count), Markers: \(markers.count), Captions: \(captions.count)")
+        lines.append("")
+        lines.append("CLIPS")
+        lines.append("Timecode In-Out | Track | Asset | Source In-Out | Gain")
+        for entry in clipEntries {
+            let asset = assetLookup[entry.clip.assetID]
+            let timelineOut = entry.clip.timelineIn + entry.clip.duration
+            let clipLabel = "\(timecode(entry.clip.timelineIn))-\(timecode(timelineOut))"
+            let sourceLabel = "\(timecode(entry.clip.inTime))-\(timecode(entry.clip.outTime))"
+            let trackLabel = "\(entry.kind.rawValue.uppercased()) \(entry.track.name)"
+            let assetLabel = asset?.name ?? "Missing Asset"
+            lines.append("\(clipLabel) | \(trackLabel) | \(assetLabel) | \(sourceLabel) | \(decimalString(entry.clip.gain))")
+        }
+        lines.append("")
+        lines.append("MARKERS")
+        if markers.isEmpty {
+            lines.append("None")
+        } else {
+            for marker in markers {
+                lines.append("\(timecode(marker.time))  \(marker.label)")
+            }
+        }
+        lines.append("")
+        lines.append("CAPTIONS")
+        if captions.isEmpty {
+            lines.append("None")
+        } else {
+            for segment in captions {
+                lines.append("\(timecode(segment.start))-\(timecode(segment.end))  \(segment.text)")
+            }
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    #if canImport(AppKit)
+    private func buildPDFReportData(from reportText: String) -> Data? {
+        let lines = reportText
+            .components(separatedBy: .newlines)
+            .map { String($0.prefix(220)) }
+        let printableLines = lines.isEmpty ? [""] : lines
+        let pageRect = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let margin: CGFloat = 36
+        let lineHeight: CGFloat = 14
+        let usableHeight = pageRect.height - (margin * 2)
+        let linesPerPage = max(1, Int(floor(usableHeight / lineHeight)))
+        let bodyFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: bodyFont,
+            .foregroundColor: NSColor.black
+        ]
+
+        let pdfData = NSMutableData()
+        guard let dataConsumer = CGDataConsumer(data: pdfData as CFMutableData) else {
+            return nil
+        }
+        var mediaBox = pageRect
+        guard let context = CGContext(consumer: dataConsumer, mediaBox: &mediaBox, nil) else {
+            return nil
+        }
+
+        var lineIndex = 0
+        while lineIndex < printableLines.count {
+            context.beginPDFPage(nil)
+            NSGraphicsContext.saveGraphicsState()
+            let graphicsContext = NSGraphicsContext(cgContext: context, flipped: false)
+            NSGraphicsContext.current = graphicsContext
+
+            var currentY = pageRect.height - margin - lineHeight
+            for _ in 0..<linesPerPage where lineIndex < printableLines.count {
+                let line = printableLines[lineIndex]
+                (line as NSString).draw(at: CGPoint(x: margin, y: currentY), withAttributes: attributes)
+                currentY -= lineHeight
+                lineIndex += 1
+            }
+
+            NSGraphicsContext.restoreGraphicsState()
+            context.endPDFPage()
+        }
+        context.closePDF()
+        return pdfData as Data
+    }
+    #endif
+
+    private func defaultReportFileStem(for sequence: EditorSequence) -> String {
+        "\(safeFilenameToken(project.name))-\(safeFilenameToken(sequence.name))-report"
+    }
+
+    private func safeFilenameToken(_ value: String) -> String {
+        let replaced = value.replacingOccurrences(
+            of: "[^A-Za-z0-9_-]+",
+            with: "-",
+            options: .regularExpression
+        )
+        let trimmed = replaced.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return trimmed.isEmpty ? "untitled" : trimmed
+    }
+
+    private func reportURL(from chosenURL: URL, expectedExtension: String) -> URL {
+        var outputURL = chosenURL
+        let ext = outputURL.pathExtension.lowercased()
+        if ext.isEmpty {
+            outputURL.appendPathExtension(expectedExtension)
+            return outputURL
+        }
+        if ext != expectedExtension.lowercased() {
+            outputURL.deletePathExtension()
+            outputURL.appendPathExtension(expectedExtension)
+        }
+        return outputURL
+    }
+
+    private func csvRow(_ values: [String]) -> String {
+        values.map(csvEscaped).joined(separator: ",")
+    }
+
+    private func csvEscaped(_ value: String) -> String {
+        let escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
+        if escaped.contains(",") || escaped.contains("\"") || escaped.contains("\n") || escaped.contains("\r") {
+            return "\"\(escaped)\""
+        }
+        return escaped
+    }
+
+    private func decimalString(_ value: Double) -> String {
+        String(format: "%.3f", value)
+    }
+
+    private func boolString(_ value: Bool) -> String {
+        value ? "true" : "false"
+    }
+
     private func refreshTranscriptMatches() {
         let allSegments = activeSequence?.captionTracks.flatMap(\.segments)
             .sorted(by: { $0.start < $1.start }) ?? []
@@ -2495,13 +2979,30 @@ public struct EditorRootView: View {
     @State private var inspectorTab: InspectorTab = .video
     @State private var isBrowserPanelVisible = true
     @State private var isInspectorPanelVisible = true
+    @State private var inspectorPlacement: WorkspaceLayoutSettings.InspectorPlacement = .right
     @State private var workspacePreset: WorkspacePreset = .editing
     @State private var isRestoringWorkspaceLayout = false
+    @State private var browserPanelWidth: CGFloat = 290
+    @State private var inspectorPanelWidth: CGFloat = 285
+    @State private var viewerPaneHeight: CGFloat = 360
+    @State private var viewerLayout: WorkspaceLayoutSettings.ViewerLayout = .auto
+    @State private var trackLaneHeight: CGFloat = 54
     @State private var timelineZoom: Double = 1.0
     @State private var sourceViewerZoom: Double = 1.0
     @State private var programViewerZoom: Double = 1.0
+    @State private var selectedBrowserBinID: UUID?
+    @State private var editingBrowserBinID: UUID?
+    @State private var editingBrowserBinName = ""
     @State private var draggingClipID: UUID?
     @State private var dragTranslationX: CGFloat = 0
+    @State private var leftResizeStartWidth: CGFloat?
+    @State private var rightResizeStartWidth: CGFloat?
+    @State private var centerResizeStartHeight: CGFloat?
+    private let timelineZoomBounds: ClosedRange<Double> = 0.6...2.2
+    private let viewerZoomBounds: ClosedRange<Double> = 0.6...2.5
+    private let panelWidthBounds: ClosedRange<Double> = 145...420
+    private let viewerPaneHeightBounds: ClosedRange<Double> = 220...900
+    private let trackLaneHeightBounds: ClosedRange<Double> = 44...96
 
     public init() {}
 
@@ -2548,6 +3049,11 @@ public struct EditorRootView: View {
         }
     }
 
+    private enum SidePanelKind {
+        case browser
+        case inspector
+    }
+
     private var activeSequence: EditorSequence? {
         workspace.activeSequence
     }
@@ -2570,6 +3076,40 @@ public struct EditorRootView: View {
         audioTracks
             .flatMap(\.clips)
             .sorted(by: { $0.timelineIn < $1.timelineIn })
+    }
+
+    private var browserBins: [MediaBin] {
+        workspace.project.bins
+    }
+
+    private var selectedBrowserBin: MediaBin? {
+        guard let selectedBrowserBinID else { return nil }
+        return browserBins.first(where: { $0.id == selectedBrowserBinID })
+    }
+
+    private var browserAssets: [MediaAsset] {
+        guard browserTab == .libraries, let selectedBrowserBin else {
+            return workspace.project.assets
+        }
+
+        let assetLookup = Dictionary(uniqueKeysWithValues: workspace.project.assets.map { ($0.id, $0) })
+        return selectedBrowserBin.assetIDs.compactMap { assetLookup[$0] }
+    }
+
+    private var canAddSelectedAssetToActiveBin: Bool {
+        guard let selectedAssetID = workspace.selectedAssetID,
+              let selectedBrowserBin else {
+            return false
+        }
+        return !selectedBrowserBin.assetIDs.contains(selectedAssetID)
+    }
+
+    private var canRemoveSelectedAssetFromActiveBin: Bool {
+        guard let selectedAssetID = workspace.selectedAssetID,
+              let selectedBrowserBin else {
+            return false
+        }
+        return selectedBrowserBin.assetIDs.contains(selectedAssetID)
     }
 
     private var clipCount: Int {
@@ -2681,9 +3221,35 @@ public struct EditorRootView: View {
 
     private func adjustViewerZoom(for kind: ViewerKind, delta: Double) {
         if kind == .source {
-            sourceViewerZoom = min(2.5, max(0.6, sourceViewerZoom + delta))
+            sourceViewerZoom = clamped(sourceViewerZoom + delta, in: viewerZoomBounds)
         } else {
-            programViewerZoom = min(2.5, max(0.6, programViewerZoom + delta))
+            programViewerZoom = clamped(programViewerZoom + delta, in: viewerZoomBounds)
+        }
+    }
+
+    private func clamped(_ value: Double, in bounds: ClosedRange<Double>) -> Double {
+        min(bounds.upperBound, max(bounds.lowerBound, value))
+    }
+
+    private func shouldStackViewers(compact: Bool, panelsVisible: Bool) -> Bool {
+        switch viewerLayout {
+        case .auto:
+            return compact && panelsVisible
+        case .sideBySide:
+            return false
+        case .stacked:
+            return true
+        }
+    }
+
+    private var viewerLayoutTitle: String {
+        switch viewerLayout {
+        case .auto:
+            return "Auto"
+        case .sideBySide:
+            return "SideBySide"
+        case .stacked:
+            return "Stacked"
         }
     }
 
@@ -2725,6 +3291,14 @@ public struct EditorRootView: View {
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.saveProject)) { _ in
             enterEditor()
             workspace.saveProject()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.exportCSVReport)) { _ in
+            enterEditor()
+            workspace.exportCSVReportUsingDialog()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.exportPDFReport)) { _ in
+            enterEditor()
+            workspace.exportPDFReportUsingDialog()
         }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.importMedia)) { _ in
             enterEditor()
@@ -2870,58 +3444,125 @@ public struct EditorRootView: View {
             enterEditor()
             applyWorkspacePreset(.captions)
         }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.moveInspectorLeft)) { _ in
+            enterEditor()
+            setInspectorPlacement(.left)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.moveInspectorRight)) { _ in
+            enterEditor()
+            setInspectorPlacement(.right)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.resetWorkspaceLayout)) { _ in
+            enterEditor()
+            resetWorkspaceLayoutToDefaults()
+        }
         .onAppear {
             restoreWorkspaceLayoutFromProject()
+            ensureSelectedBrowserBin()
         }
         .onChange(of: workspace.project.id) { _ in
             restoreWorkspaceLayoutFromProject()
+            ensureSelectedBrowserBin()
         }
         .onChange(of: workspace.currentProjectBundleURL) { _ in
             restoreWorkspaceLayoutFromProject()
         }
+        .onChange(of: workspace.project.bins.map(\.id)) { _ in
+            ensureSelectedBrowserBin()
+        }
         .onChange(of: browserTab) { _ in
             syncWorkspacePreset()
+            if browserTab == .libraries {
+                ensureSelectedBrowserBin()
+            }
         }
         .onChange(of: inspectorTab) { _ in
             syncWorkspacePreset()
         }
+        .onChange(of: timelineZoom) { _ in
+            persistWorkspaceLayout()
+        }
+        .onChange(of: sourceViewerZoom) { _ in
+            persistWorkspaceLayout()
+        }
+        .onChange(of: programViewerZoom) { _ in
+            persistWorkspaceLayout()
+        }
+        .onChange(of: inspectorPlacement) { _ in
+            persistWorkspaceLayout()
+        }
+        .onChange(of: browserPanelWidth) { _ in
+            persistWorkspaceLayout()
+        }
+        .onChange(of: inspectorPanelWidth) { _ in
+            persistWorkspaceLayout()
+        }
+        .onChange(of: viewerPaneHeight) { _ in
+            persistWorkspaceLayout()
+        }
+        .onChange(of: viewerLayout) { _ in
+            persistWorkspaceLayout()
+        }
+        .onChange(of: trackLaneHeight) { _ in
+            persistWorkspaceLayout()
+        }
     }
 
     private func editorWorkspace(compact: Bool, narrow: Bool) -> some View {
-        VStack(spacing: 0) {
+        let leftPanelKind: SidePanelKind = inspectorPlacement == .left ? .inspector : .browser
+        let rightPanelKind: SidePanelKind = inspectorPlacement == .left ? .browser : .inspector
+        let leftPanelVisible = isPanelVisible(leftPanelKind)
+        let rightPanelVisible = isPanelVisible(rightPanelKind)
+
+        return VStack(spacing: 0) {
             ZStack(alignment: .top) {
-                HSplitView {
-                    if isBrowserPanelVisible {
-                        browserPanel
-                            .frame(
-                                minWidth: narrow ? 145 : 210,
-                                idealWidth: compact ? 220 : 290,
-                                maxWidth: compact ? 300 : 360
-                            )
-                    }
+                HStack(spacing: 0) {
+                    if leftPanelVisible {
+                        sidePanel(for: leftPanelKind)
+                            .frame(width: panelWidth(for: leftPanelKind, compact: compact, narrow: narrow))
+                            .background(panelBackgroundColor(for: leftPanelKind))
 
-                    VSplitView {
-                        VStack(spacing: 8) {
-                            topToolbar(compact: compact)
-                            viewerWorkbench(stacked: compact && (isBrowserPanelVisible || isInspectorPanelVisible))
+                        resizeHandle {
+                            if leftResizeStartWidth == nil {
+                                leftResizeStartWidth = panelWidth(for: leftPanelKind, compact: compact, narrow: narrow)
+                            }
+                            let start = leftResizeStartWidth ?? panelWidth(for: leftPanelKind, compact: compact, narrow: narrow)
+                            setPanelWidth(
+                                start + $0,
+                                for: leftPanelKind,
+                                compact: compact,
+                                narrow: narrow
+                            )
+                        } onEnded: {
+                            leftResizeStartWidth = nil
                         }
-                        .padding(8)
-                        .background(Color(red: 0.13, green: 0.13, blue: 0.14))
-                        .frame(minHeight: compact ? 300 : 360)
-
-                        timelinePanel
-                            .frame(minHeight: compact ? 240 : 280)
-                            .background(Color(red: 0.15, green: 0.15, blue: 0.16))
                     }
 
-                    if isInspectorPanelVisible {
-                        inspectorPanel
-                            .frame(
-                                minWidth: narrow ? 145 : 210,
-                                idealWidth: compact ? 220 : 285,
-                                maxWidth: compact ? 290 : 340
+                    centerWorkspace(
+                        compact: compact,
+                        panelsVisible: leftPanelVisible || rightPanelVisible
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    if rightPanelVisible {
+                        resizeHandle {
+                            if rightResizeStartWidth == nil {
+                                rightResizeStartWidth = panelWidth(for: rightPanelKind, compact: compact, narrow: narrow)
+                            }
+                            let start = rightResizeStartWidth ?? panelWidth(for: rightPanelKind, compact: compact, narrow: narrow)
+                            setPanelWidth(
+                                start - $0,
+                                for: rightPanelKind,
+                                compact: compact,
+                                narrow: narrow
                             )
-                            .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+                        } onEnded: {
+                            rightResizeStartWidth = nil
+                        }
+
+                        sidePanel(for: rightPanelKind)
+                            .frame(width: panelWidth(for: rightPanelKind, compact: compact, narrow: narrow))
+                            .background(panelBackgroundColor(for: rightPanelKind))
                     }
                 }
                 .background(Color(red: 0.12, green: 0.12, blue: 0.13))
@@ -2960,6 +3601,149 @@ public struct EditorRootView: View {
             bottomBar
                 .background(Color(red: 0.10, green: 0.10, blue: 0.11))
         }
+    }
+
+    @ViewBuilder
+    private func sidePanel(for kind: SidePanelKind) -> some View {
+        switch kind {
+        case .browser:
+            browserPanel
+        case .inspector:
+            inspectorPanel
+        }
+    }
+
+    private func panelBackgroundColor(for kind: SidePanelKind) -> Color {
+        switch kind {
+        case .browser:
+            return Color(red: 0.12, green: 0.12, blue: 0.13)
+        case .inspector:
+            return Color(red: 0.12, green: 0.12, blue: 0.13)
+        }
+    }
+
+    private func resizeHandle(
+        onChanged: @escaping (CGFloat) -> Void,
+        onEnded: @escaping () -> Void
+    ) -> some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.09))
+            .frame(width: 4)
+            .overlay(Rectangle().fill(Color.white.opacity(0.20)).frame(width: 1))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        onChanged(value.translation.width)
+                    }
+                    .onEnded { _ in
+                        onEnded()
+                    }
+            )
+    }
+
+    private func isPanelVisible(_ kind: SidePanelKind) -> Bool {
+        switch kind {
+        case .browser:
+            return isBrowserPanelVisible
+        case .inspector:
+            return isInspectorPanelVisible
+        }
+    }
+
+    private func panelWidth(for kind: SidePanelKind, compact: Bool, narrow: Bool) -> CGFloat {
+        let sourceWidth = (kind == .browser) ? browserPanelWidth : inspectorPanelWidth
+        return constrainedPanelWidth(sourceWidth, compact: compact, narrow: narrow)
+    }
+
+    private func setPanelWidth(_ value: CGFloat, for kind: SidePanelKind, compact: Bool, narrow: Bool) {
+        let constrained = constrainedPanelWidth(value, compact: compact, narrow: narrow)
+        switch kind {
+        case .browser:
+            browserPanelWidth = constrained
+        case .inspector:
+            inspectorPanelWidth = constrained
+        }
+    }
+
+    private func constrainedPanelWidth(_ width: CGFloat, compact: Bool, narrow: Bool) -> CGFloat {
+        let dynamicMin = narrow ? 145.0 : 210.0
+        let dynamicMax = compact ? 360.0 : 420.0
+        let lowerBound = max(panelWidthBounds.lowerBound, dynamicMin)
+        let upperBound = min(panelWidthBounds.upperBound, dynamicMax)
+        return CGFloat(clamped(Double(width), in: lowerBound...upperBound))
+    }
+
+    private func centerWorkspace(compact: Bool, panelsVisible: Bool) -> some View {
+        GeometryReader { proxy in
+            let totalHeight = max(420, proxy.size.height)
+            let viewerHeight = constrainedViewerPaneHeight(
+                viewerPaneHeight,
+                totalHeight: totalHeight,
+                compact: compact
+            )
+
+            VStack(spacing: 0) {
+                VStack(spacing: 8) {
+                    topToolbar(compact: compact)
+                    viewerWorkbench(stacked: shouldStackViewers(compact: compact, panelsVisible: panelsVisible))
+                }
+                .padding(8)
+                .background(Color(red: 0.13, green: 0.13, blue: 0.14))
+                .frame(height: viewerHeight)
+
+                verticalResizeHandle {
+                    if centerResizeStartHeight == nil {
+                        centerResizeStartHeight = viewerHeight
+                    }
+                    let start = centerResizeStartHeight ?? viewerHeight
+                    viewerPaneHeight = constrainedViewerPaneHeight(
+                        start + $0,
+                        totalHeight: totalHeight,
+                        compact: compact
+                    )
+                } onEnded: {
+                    centerResizeStartHeight = nil
+                }
+
+                timelinePanel
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(red: 0.15, green: 0.15, blue: 0.16))
+            }
+        }
+    }
+
+    private func verticalResizeHandle(
+        onChanged: @escaping (CGFloat) -> Void,
+        onEnded: @escaping () -> Void
+    ) -> some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.10))
+            .frame(height: 4)
+            .overlay(Rectangle().fill(Color.white.opacity(0.20)).frame(height: 1))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        onChanged(value.translation.height)
+                    }
+                    .onEnded { _ in
+                        onEnded()
+                    }
+            )
+    }
+
+    private func constrainedViewerPaneHeight(
+        _ height: CGFloat,
+        totalHeight: CGFloat,
+        compact: Bool
+    ) -> CGFloat {
+        let minViewer = compact ? 220.0 : 260.0
+        let minTimeline = compact ? 180.0 : 220.0
+        let maxViewerByWindow = max(minViewer, totalHeight - minTimeline - 4.0)
+        let lower = max(viewerPaneHeightBounds.lowerBound, minViewer)
+        let upper = min(viewerPaneHeightBounds.upperBound, maxViewerByWindow)
+        return CGFloat(clamped(Double(height), in: lower...upper))
     }
 
     private func homeScreen(compact: Bool) -> some View {
@@ -3090,6 +3874,37 @@ public struct EditorRootView: View {
         workspaceStage = .editor
     }
 
+    private func ensureSelectedBrowserBin() {
+        guard !browserBins.isEmpty else {
+            selectedBrowserBinID = nil
+            editingBrowserBinID = nil
+            editingBrowserBinName = ""
+            return
+        }
+        if let selectedBrowserBinID,
+           browserBins.contains(where: { $0.id == selectedBrowserBinID }) {
+            return
+        }
+        selectedBrowserBinID = browserBins.first?.id
+    }
+
+    private func startEditingBin(_ bin: MediaBin) {
+        selectedBrowserBinID = bin.id
+        editingBrowserBinID = bin.id
+        editingBrowserBinName = bin.name
+    }
+
+    private func commitEditingBin(_ binID: UUID) {
+        workspace.renameBin(binID: binID, to: editingBrowserBinName)
+        editingBrowserBinID = nil
+        editingBrowserBinName = ""
+    }
+
+    private func cancelEditingBin() {
+        editingBrowserBinID = nil
+        editingBrowserBinName = ""
+    }
+
     private func toggleBrowserPanelVisibility() {
         isBrowserPanelVisible.toggle()
         syncWorkspacePreset()
@@ -3097,6 +3912,30 @@ public struct EditorRootView: View {
 
     private func toggleInspectorPanelVisibility() {
         isInspectorPanelVisible.toggle()
+        syncWorkspacePreset()
+    }
+
+    private func setInspectorPlacement(_ placement: WorkspaceLayoutSettings.InspectorPlacement) {
+        inspectorPlacement = placement
+    }
+
+    private func resetWorkspaceLayoutToDefaults() {
+        isBrowserPanelVisible = true
+        isInspectorPanelVisible = true
+        inspectorPlacement = .right
+        browserTab = .media
+        inspectorTab = .video
+        browserPanelWidth = 290
+        inspectorPanelWidth = 285
+        viewerPaneHeight = 360
+        viewerLayout = .auto
+        trackLaneHeight = 54
+        timelineZoom = 1.0
+        sourceViewerZoom = 1.0
+        programViewerZoom = 1.0
+        leftResizeStartWidth = nil
+        rightResizeStartWidth = nil
+        centerResizeStartHeight = nil
         syncWorkspacePreset()
     }
 
@@ -3141,8 +3980,20 @@ public struct EditorRootView: View {
         isRestoringWorkspaceLayout = true
         isBrowserPanelVisible = stored.isBrowserPanelVisible
         isInspectorPanelVisible = stored.isInspectorPanelVisible
+        inspectorPlacement = stored.inspectorPlacement
         browserTab = browserTab(from: stored.browserTab)
         inspectorTab = inspectorTab(from: stored.inspectorTab)
+        browserPanelWidth = CGFloat(normalizedZoom(stored.browserPanelWidth, fallback: 290, bounds: panelWidthBounds))
+        inspectorPanelWidth = CGFloat(normalizedZoom(stored.inspectorPanelWidth, fallback: 285, bounds: panelWidthBounds))
+        viewerPaneHeight = CGFloat(normalizedZoom(stored.viewerPaneHeight, fallback: 360, bounds: viewerPaneHeightBounds))
+        viewerLayout = stored.viewerLayout
+        trackLaneHeight = CGFloat(normalizedZoom(stored.trackLaneHeight, fallback: 54, bounds: trackLaneHeightBounds))
+        timelineZoom = normalizedZoom(stored.timelineZoom, fallback: 1.0, bounds: timelineZoomBounds)
+        sourceViewerZoom = normalizedZoom(stored.sourceViewerZoom, fallback: 1.0, bounds: viewerZoomBounds)
+        programViewerZoom = normalizedZoom(stored.programViewerZoom, fallback: 1.0, bounds: viewerZoomBounds)
+        leftResizeStartWidth = nil
+        rightResizeStartWidth = nil
+        centerResizeStartHeight = nil
         workspacePreset = workspacePreset(from: stored.preset)
         syncWorkspacePreset()
         isRestoringWorkspaceLayout = false
@@ -3156,7 +4007,16 @@ public struct EditorRootView: View {
             isBrowserPanelVisible: isBrowserPanelVisible,
             isInspectorPanelVisible: isInspectorPanelVisible,
             browserTab: storedBrowserTab(from: browserTab),
-            inspectorTab: storedInspectorTab(from: inspectorTab)
+            inspectorTab: storedInspectorTab(from: inspectorTab),
+            inspectorPlacement: inspectorPlacement,
+            browserPanelWidth: clamped(Double(browserPanelWidth), in: panelWidthBounds),
+            inspectorPanelWidth: clamped(Double(inspectorPanelWidth), in: panelWidthBounds),
+            viewerPaneHeight: clamped(Double(viewerPaneHeight), in: viewerPaneHeightBounds),
+            viewerLayout: viewerLayout,
+            trackLaneHeight: clamped(Double(trackLaneHeight), in: trackLaneHeightBounds),
+            timelineZoom: clamped(timelineZoom, in: timelineZoomBounds),
+            sourceViewerZoom: clamped(sourceViewerZoom, in: viewerZoomBounds),
+            programViewerZoom: clamped(programViewerZoom, in: viewerZoomBounds)
         )
 
         if workspace.workspaceLayoutSettings != persistedSettings {
@@ -3242,6 +4102,17 @@ public struct EditorRootView: View {
         }
     }
 
+    private func normalizedZoom(
+        _ value: Double,
+        fallback: Double,
+        bounds: ClosedRange<Double>
+    ) -> Double {
+        guard value.isFinite else {
+            return fallback
+        }
+        return clamped(value, in: bounds)
+    }
+
     private func homeCard(title: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
@@ -3294,69 +4165,7 @@ public struct EditorRootView: View {
             .padding(.horizontal, 10)
 
             if browserTab == .libraries || browserTab == .media {
-                if workspace.project.assets.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Image(systemName: "film.stack")
-                            .font(.title)
-                            .foregroundStyle(Color(red: 0.76, green: 0.76, blue: 0.80))
-                        Text("No media in browser")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.white)
-                        Text("Import clips to start building your storyline.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button("Import Clips") {
-                            workspace.importMediaUsingDialog()
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(Color.white.opacity(0.06))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .padding(10)
-                } else {
-                    HStack {
-                        Button("Append Selected") {
-                            workspace.appendSelectedAssetToTimeline()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(workspace.selectedAssetID == nil)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.top, 2)
-
-                    List(workspace.project.assets) { asset in
-                        HStack(spacing: 8) {
-                            Image(systemName: symbol(for: asset.type))
-                                .foregroundStyle(.white.opacity(0.9))
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(asset.name)
-                                    .foregroundStyle(.white)
-                                Text("\(asset.type.rawValue.capitalized) • \(workspace.timecode(asset.duration))")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                        }
-                        .padding(.vertical, 2)
-                        .listRowBackground(
-                            workspace.selectedAssetID == asset.id ?
-                            Color.white.opacity(0.12) :
-                            Color.clear
-                        )
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            workspace.selectAsset(asset.id)
-                        }
-                        .onTapGesture(count: 2) {
-                            workspace.selectAsset(asset.id)
-                            workspace.appendAssetToTimeline(assetID: asset.id)
-                        }
-                        .draggable(asset.id.uuidString)
-                    }
-                }
+                mediaBrowserContent(showBins: browserTab == .libraries)
             } else if browserTab == .timelineIndex {
                 timelineIndexPanel
             } else {
@@ -3371,6 +4180,241 @@ public struct EditorRootView: View {
             Spacer()
         }
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+    }
+
+    @ViewBuilder
+    private func mediaBrowserContent(showBins: Bool) -> some View {
+        if workspace.project.assets.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Image(systemName: "film.stack")
+                    .font(.title)
+                    .foregroundStyle(Color(red: 0.76, green: 0.76, blue: 0.80))
+                Text("No media in browser")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                Text("Import clips to start building your storyline.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Import Clips") {
+                    workspace.importMediaUsingDialog()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(Color.white.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .padding(10)
+        } else {
+            if showBins {
+                browserBinsSection
+                    .padding(.horizontal, 10)
+                    .padding(.top, 2)
+            }
+
+            HStack(spacing: 6) {
+                Button("Append Selected") {
+                    workspace.appendSelectedAssetToTimeline()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(workspace.selectedAssetID == nil)
+
+                if showBins {
+                    Button("Add To Bin") {
+                        guard let selectedAssetID = workspace.selectedAssetID,
+                              let selectedBrowserBinID else { return }
+                        workspace.addAsset(selectedAssetID, toBin: selectedBrowserBinID)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!canAddSelectedAssetToActiveBin)
+
+                    Button("Remove") {
+                        guard let selectedAssetID = workspace.selectedAssetID,
+                              let selectedBrowserBinID else { return }
+                        workspace.removeAsset(selectedAssetID, fromBin: selectedBrowserBinID)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!canRemoveSelectedAssetFromActiveBin)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 2)
+
+            if showBins,
+               let selectedBrowserBin,
+               browserAssets.isEmpty {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("No assets in \(selectedBrowserBin.name)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                        Text("Drag clips onto a bin, or use Add To Bin.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(10)
+                .background(Color.white.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 10)
+                .padding(.top, 2)
+            }
+
+            List(browserAssets) { asset in
+                HStack(spacing: 8) {
+                    Image(systemName: symbol(for: asset.type))
+                        .foregroundStyle(.white.opacity(0.9))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(asset.name)
+                            .foregroundStyle(.white)
+                        Text("\(asset.type.rawValue.capitalized) • \(workspace.timecode(asset.duration))")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if showBins, let selectedBrowserBin {
+                        Text(selectedBrowserBin.name)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 2)
+                .listRowBackground(
+                    workspace.selectedAssetID == asset.id ?
+                    Color.white.opacity(0.12) :
+                    Color.clear
+                )
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    workspace.selectAsset(asset.id)
+                }
+                .onTapGesture(count: 2) {
+                    workspace.selectAsset(asset.id)
+                    workspace.appendAssetToTimeline(assetID: asset.id)
+                }
+                .contextMenu {
+                    if showBins, let selectedBrowserBinID {
+                        Button("Add to Selected Bin") {
+                            workspace.addAsset(asset.id, toBin: selectedBrowserBinID)
+                        }
+                    }
+                    ForEach(browserBins) { bin in
+                        Button("Add to \(bin.name)") {
+                            workspace.addAsset(asset.id, toBin: bin.id)
+                        }
+                    }
+                }
+                .draggable(asset.id.uuidString)
+            }
+        }
+    }
+
+    private var browserBinsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Bins")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    workspace.createBin()
+                    selectedBrowserBinID = browserBins.last?.id
+                } label: {
+                    Label("New Bin", systemImage: "folder.badge.plus")
+                        .font(.caption2.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+            }
+
+            if browserBins.isEmpty {
+                Text("Create bins to organize imported clips.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(browserBins) { bin in
+                    HStack(spacing: 8) {
+                        Image(systemName: selectedBrowserBinID == bin.id ? "folder.fill" : "folder")
+                            .foregroundStyle(selectedBrowserBinID == bin.id ? .yellow : .white.opacity(0.85))
+
+                        if editingBrowserBinID == bin.id {
+                            TextField("Bin Name", text: $editingBrowserBinName)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit {
+                                    commitEditingBin(bin.id)
+                                }
+                            Button("Save") {
+                                commitEditingBin(bin.id)
+                            }
+                            .buttonStyle(.bordered)
+                            Button("Cancel") {
+                                cancelEditingBin()
+                            }
+                            .buttonStyle(.bordered)
+                        } else {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(bin.name)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                Text("\(bin.assetIDs.count) assets")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button {
+                                startEditingBin(bin)
+                            } label: {
+                                Image(systemName: "pencil")
+                                    .font(.caption2.weight(.semibold))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.white.opacity(0.8))
+
+                            Button(role: .destructive) {
+                                workspace.deleteBin(binID: bin.id)
+                                ensureSelectedBrowserBin()
+                                cancelEditingBin()
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.caption2.weight(.semibold))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.white.opacity(0.8))
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(
+                                selectedBrowserBinID == bin.id ?
+                                Color.white.opacity(0.12) :
+                                Color.white.opacity(0.04)
+                            )
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        selectedBrowserBinID = bin.id
+                        if editingBrowserBinID != bin.id {
+                            cancelEditingBin()
+                        }
+                    }
+                    .dropDestination(for: String.self) { items, _ in
+                        guard let rawID = items.first,
+                              let assetID = UUID(uuidString: rawID) else {
+                            return false
+                        }
+                        selectedBrowserBinID = bin.id
+                        workspace.addAsset(assetID, toBin: bin.id)
+                        return true
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private var timelineIndexPanel: some View {
@@ -3597,6 +4641,15 @@ public struct EditorRootView: View {
                         Button("Editing") { applyWorkspacePreset(.editing) }
                         Button("Focused") { applyWorkspacePreset(.focused) }
                         Button("Captions") { applyWorkspacePreset(.captions) }
+                        Divider()
+                        Button("Viewer Auto") { viewerLayout = .auto }
+                        Button("Viewer Side By Side") { viewerLayout = .sideBySide }
+                        Button("Viewer Stacked") { viewerLayout = .stacked }
+                        Divider()
+                        Button("Inspector Left") { setInspectorPlacement(.left) }
+                        Button("Inspector Right") { setInspectorPlacement(.right) }
+                        Divider()
+                        Button("Reset") { resetWorkspaceLayoutToDefaults() }
                     } label: {
                         Label("Layout: \(workspacePreset.title)", systemImage: "rectangle.3.group")
                             .font(.caption)
@@ -3649,6 +4702,8 @@ public struct EditorRootView: View {
                     toolbarButton("Reframe 9:16", systemImage: "rectangle.portrait.and.arrow.right") { workspace.applySmartReframePreset("9:16") }
                     toolbarButton("Highlights", systemImage: "sparkles") { workspace.runHighlightSuggestions() }
                     toolbarButton("Export", systemImage: "square.and.arrow.up") { workspace.enqueueExport() }
+                    toolbarButton("CSV Report", systemImage: "tablecells") { workspace.exportCSVReportUsingDialog() }
+                    toolbarButton("PDF Report", systemImage: "doc.richtext") { workspace.exportPDFReportUsingDialog() }
                     if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
                         toolbarButton("Cancel Export", systemImage: "xmark.circle") { workspace.cancelExport() }
                     }
@@ -3913,7 +4968,18 @@ public struct EditorRootView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
-                    Slider(value: $timelineZoom, in: 0.6...2.2)
+                    Text("Lane \(Int(trackLaneHeight))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Slider(
+                        value: Binding(
+                            get: { Double(trackLaneHeight) },
+                            set: { trackLaneHeight = CGFloat(clamped($0, in: trackLaneHeightBounds)) }
+                        ),
+                        in: trackLaneHeightBounds
+                    )
+                    .frame(width: 90)
+                    Slider(value: $timelineZoom, in: timelineZoomBounds)
                         .frame(width: 120)
                 }
                 .padding(.horizontal, 10)
@@ -3998,6 +5064,30 @@ public struct EditorRootView: View {
 
     private var timelineCanvasWidth: CGFloat {
         max(900, CGFloat(timelineDuration) * timelinePixelsPerSecond + 120)
+    }
+
+    private var normalizedTrackLaneHeight: CGFloat {
+        CGFloat(clamped(Double(trackLaneHeight), in: trackLaneHeightBounds))
+    }
+
+    private var trackClipHeight: CGFloat {
+        max(28, normalizedTrackLaneHeight - 10)
+    }
+
+    private var trackClipVerticalInset: CGFloat {
+        max(3, (normalizedTrackLaneHeight - trackClipHeight) / 2)
+    }
+
+    private var captionLaneHeight: CGFloat {
+        max(40, normalizedTrackLaneHeight - 8)
+    }
+
+    private var captionClipHeight: CGFloat {
+        max(24, captionLaneHeight - 14)
+    }
+
+    private var captionClipVerticalInset: CGFloat {
+        max(4, (captionLaneHeight - captionClipHeight) / 2)
     }
 
     private var timelineRuler: some View {
@@ -4156,7 +5246,7 @@ public struct EditorRootView: View {
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(Color.white.opacity(isLocked ? 0.03 : 0.04))
-                    .frame(width: timelineCanvasWidth, height: 54)
+                    .frame(width: timelineCanvasWidth, height: normalizedTrackLaneHeight)
                     .contentShape(Rectangle())
                     .gesture(
                         DragGesture(minimumDistance: 0)
@@ -4168,7 +5258,7 @@ public struct EditorRootView: View {
                 ForEach(activeSequence?.markers ?? []) { marker in
                     Rectangle()
                         .fill(Color.yellow.opacity(0.50))
-                        .frame(width: 1, height: 54)
+                        .frame(width: 1, height: normalizedTrackLaneHeight)
                         .offset(x: xPosition(for: marker.time))
                 }
 
@@ -4185,7 +5275,7 @@ public struct EditorRootView: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
-                    .frame(width: clipWidth(for: clip.duration), height: 44, alignment: .leading)
+                    .frame(width: clipWidth(for: clip.duration), height: trackClipHeight, alignment: .leading)
                     .background(clipFillColor(for: clip, baseTint: tint))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(
@@ -4195,9 +5285,41 @@ public struct EditorRootView: View {
                                 lineWidth: 1.6
                             )
                     )
+                    .overlay(alignment: .leading) {
+                        if !isLocked {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(Color.white.opacity(0.55))
+                                .frame(width: 4, height: max(16, trackClipHeight - 10))
+                                .padding(.leading, 2)
+                                .gesture(
+                                    DragGesture(minimumDistance: 1)
+                                        .onEnded { gesture in
+                                            workspace.selectClip(clip.id)
+                                            let delta = snappedTimelineDelta(for: gesture.translation.width)
+                                            workspace.trimSelectedClipLeading(by: delta)
+                                        }
+                                )
+                        }
+                    }
+                    .overlay(alignment: .trailing) {
+                        if !isLocked {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(Color.white.opacity(0.55))
+                                .frame(width: 4, height: max(16, trackClipHeight - 10))
+                                .padding(.trailing, 2)
+                                .gesture(
+                                    DragGesture(minimumDistance: 1)
+                                        .onEnded { gesture in
+                                            workspace.selectClip(clip.id)
+                                            let delta = snappedTimelineDelta(for: gesture.translation.width)
+                                            workspace.trimSelectedClipTrailing(by: delta)
+                                        }
+                                )
+                        }
+                    }
                     .offset(
                         x: xPosition(for: clip.timelineIn) + (draggingClipID == clip.id ? dragTranslationX : 0),
-                        y: 5
+                        y: trackClipVerticalInset
                     )
                     .onTapGesture {
                         workspace.selectClip(clip.id)
@@ -4266,7 +5388,7 @@ public struct EditorRootView: View {
 
                 Rectangle()
                     .fill(Color.white.opacity(0.9))
-                    .frame(width: 2, height: 54)
+                    .frame(width: 2, height: normalizedTrackLaneHeight)
                     .offset(x: xPosition(for: workspace.playheadTime))
             }
             .overlay(
@@ -4276,7 +5398,7 @@ public struct EditorRootView: View {
                         lineWidth: 1.4
                     )
             )
-            .frame(width: timelineCanvasWidth, height: 54, alignment: .leading)
+            .frame(width: timelineCanvasWidth, height: normalizedTrackLaneHeight, alignment: .leading)
             .dropDestination(for: String.self) { items, location in
                 guard let rawID = items.first,
                       let assetID = UUID(uuidString: rawID) else {
@@ -4332,7 +5454,7 @@ public struct EditorRootView: View {
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 6)
                 .fill(Color.white.opacity(0.04))
-                .frame(width: timelineCanvasWidth, height: 44)
+                .frame(width: timelineCanvasWidth, height: captionLaneHeight)
 
             ForEach(captionSegments) { segment in
                 Text(segment.text)
@@ -4341,14 +5463,14 @@ public struct EditorRootView: View {
                     .foregroundStyle(.white.opacity(0.90))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .frame(width: max(48, clipWidth(for: segment.end - segment.start)), height: 30, alignment: .leading)
+                    .frame(width: max(48, clipWidth(for: segment.end - segment.start)), height: captionClipHeight, alignment: .leading)
                     .background(
                         workspace.selectedCaptionSegmentID == segment.id ?
                         Color(red: 0.95, green: 0.82, blue: 0.34).opacity(0.85) :
                         Color(red: 0.67, green: 0.58, blue: 0.23).opacity(0.65)
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .offset(x: xPosition(for: segment.start), y: 7)
+                    .offset(x: xPosition(for: segment.start), y: captionClipVerticalInset)
                     .onTapGesture {
                         workspace.jumpToTranscriptSegment(segment.id)
                     }
@@ -4356,10 +5478,10 @@ public struct EditorRootView: View {
 
             Rectangle()
                 .fill(Color.white.opacity(0.9))
-                .frame(width: 2, height: 44)
+                .frame(width: 2, height: captionLaneHeight)
                 .offset(x: xPosition(for: workspace.playheadTime))
         }
-        .frame(width: timelineCanvasWidth, height: 44, alignment: .leading)
+        .frame(width: timelineCanvasWidth, height: captionLaneHeight, alignment: .leading)
     }
 
     private func clipWidth(for duration: TimeInterval) -> CGFloat {
@@ -4749,6 +5871,22 @@ public struct EditorRootView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
+                Text("Inspector Side: \(inspectorPlacement == .left ? "Left" : "Right")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text("Viewer H: \(Int(viewerPaneHeight))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text("Viewer Layout: \(viewerLayoutTitle)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text("Track H: \(Int(trackLaneHeight))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Text("Speed: \(String(format: "%.1fx", workspace.playbackRate))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -4803,6 +5941,8 @@ public struct EditorRootView: View {
             Text("Cmd+O  Open Project")
             Text("Cmd+S  Save Project")
             Text("Cmd+I  Import Media")
+            Text("Cmd+Shift+R  Export CSV Report")
+            Text("Cmd+Opt+Shift+R  Export PDF Report")
             Text("Cmd+E  Append Selected Asset")
             Text("Cmd+\\  Split Selected Clip")
             Text("Cmd+Shift+Delete  Ripple Delete Selected")
@@ -4812,9 +5952,12 @@ public struct EditorRootView: View {
             Text("Cmd+Shift+W  Toggle Insert/Overwrite")
             Text("Cmd+Opt+Shift+V / A  Add Video/Audio Track")
             Text("Drag Browser clip onto Timeline to insert at drop point")
+            Text("Drag clip edges in timeline lanes to trim In/Out")
+            Text("Libraries tab: drag clips onto bins to organize media")
             Text("Use Event Viewer In/Out + Insert for subclip editing")
             Text("Toolbar Edit Mode: Insert / Overwrite")
             Text("Timeline lane buttons: Target / Mute / Solo / Lock")
+            Text("Drag panel dividers to resize side panes and viewer/timeline split")
             Text("Alt+Left/Right  Prev/Next Edit")
             Text("Cmd+Left/Right  Start/End")
             Text("I / O  Set In / Out")
@@ -4825,7 +5968,9 @@ public struct EditorRootView: View {
             Text("Cmd+Shift+M  Toggle Timeline Mode")
             Text("Cmd+Opt+B  Toggle Browser Panel")
             Text("Cmd+Opt+I  Toggle Inspector Panel")
+            Text("Cmd+Opt+[ / ]  Move Inspector Left / Right")
             Text("Cmd+Opt+1/2/3  Editing / Focused / Captions Layout")
+            Text("Cmd+Opt+0  Reset Workspace Layout")
             Text("Cmd+/  Toggle This Help")
         }
         .font(.caption)

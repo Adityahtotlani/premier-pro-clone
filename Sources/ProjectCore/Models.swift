@@ -248,24 +248,115 @@ public struct WorkspaceLayoutSettings: Codable, Equatable, Sendable {
         case info
     }
 
+    public enum InspectorPlacement: String, Codable, CaseIterable, Sendable {
+        case left
+        case right
+    }
+
+    public enum ViewerLayout: String, Codable, CaseIterable, Sendable {
+        case auto
+        case sideBySide
+        case stacked
+    }
+
     public var preset: Preset
     public var isBrowserPanelVisible: Bool
     public var isInspectorPanelVisible: Bool
     public var browserTab: BrowserTab
     public var inspectorTab: InspectorTab
+    public var inspectorPlacement: InspectorPlacement
+    public var browserPanelWidth: Double
+    public var inspectorPanelWidth: Double
+    public var viewerPaneHeight: Double
+    public var viewerLayout: ViewerLayout
+    public var trackLaneHeight: Double
+    public var timelineZoom: Double
+    public var sourceViewerZoom: Double
+    public var programViewerZoom: Double
 
     public init(
         preset: Preset = .editing,
         isBrowserPanelVisible: Bool = true,
         isInspectorPanelVisible: Bool = true,
         browserTab: BrowserTab = .media,
-        inspectorTab: InspectorTab = .video
+        inspectorTab: InspectorTab = .video,
+        inspectorPlacement: InspectorPlacement = .right,
+        browserPanelWidth: Double = 290,
+        inspectorPanelWidth: Double = 285,
+        viewerPaneHeight: Double = 360,
+        viewerLayout: ViewerLayout = .auto,
+        trackLaneHeight: Double = 54,
+        timelineZoom: Double = 1.0,
+        sourceViewerZoom: Double = 1.0,
+        programViewerZoom: Double = 1.0
     ) {
         self.preset = preset
         self.isBrowserPanelVisible = isBrowserPanelVisible
         self.isInspectorPanelVisible = isInspectorPanelVisible
         self.browserTab = browserTab
         self.inspectorTab = inspectorTab
+        self.inspectorPlacement = inspectorPlacement
+        self.browserPanelWidth = browserPanelWidth
+        self.inspectorPanelWidth = inspectorPanelWidth
+        self.viewerPaneHeight = viewerPaneHeight
+        self.viewerLayout = viewerLayout
+        self.trackLaneHeight = trackLaneHeight
+        self.timelineZoom = timelineZoom
+        self.sourceViewerZoom = sourceViewerZoom
+        self.programViewerZoom = programViewerZoom
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case preset
+        case isBrowserPanelVisible
+        case isInspectorPanelVisible
+        case browserTab
+        case inspectorTab
+        case inspectorPlacement
+        case browserPanelWidth
+        case inspectorPanelWidth
+        case viewerPaneHeight
+        case viewerLayout
+        case trackLaneHeight
+        case timelineZoom
+        case sourceViewerZoom
+        case programViewerZoom
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        preset = try container.decodeIfPresent(Preset.self, forKey: .preset) ?? .editing
+        isBrowserPanelVisible = try container.decodeIfPresent(Bool.self, forKey: .isBrowserPanelVisible) ?? true
+        isInspectorPanelVisible = try container.decodeIfPresent(Bool.self, forKey: .isInspectorPanelVisible) ?? true
+        browserTab = try container.decodeIfPresent(BrowserTab.self, forKey: .browserTab) ?? .media
+        inspectorTab = try container.decodeIfPresent(InspectorTab.self, forKey: .inspectorTab) ?? .video
+        inspectorPlacement = try container.decodeIfPresent(InspectorPlacement.self, forKey: .inspectorPlacement) ?? .right
+        browserPanelWidth = try container.decodeIfPresent(Double.self, forKey: .browserPanelWidth) ?? 290
+        inspectorPanelWidth = try container.decodeIfPresent(Double.self, forKey: .inspectorPanelWidth) ?? 285
+        viewerPaneHeight = try container.decodeIfPresent(Double.self, forKey: .viewerPaneHeight) ?? 360
+        viewerLayout = try container.decodeIfPresent(ViewerLayout.self, forKey: .viewerLayout) ?? .auto
+        trackLaneHeight = try container.decodeIfPresent(Double.self, forKey: .trackLaneHeight) ?? 54
+        timelineZoom = try container.decodeIfPresent(Double.self, forKey: .timelineZoom) ?? 1.0
+        sourceViewerZoom = try container.decodeIfPresent(Double.self, forKey: .sourceViewerZoom) ?? 1.0
+        programViewerZoom = try container.decodeIfPresent(Double.self, forKey: .programViewerZoom) ?? 1.0
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(preset, forKey: .preset)
+        try container.encode(isBrowserPanelVisible, forKey: .isBrowserPanelVisible)
+        try container.encode(isInspectorPanelVisible, forKey: .isInspectorPanelVisible)
+        try container.encode(browserTab, forKey: .browserTab)
+        try container.encode(inspectorTab, forKey: .inspectorTab)
+        try container.encode(inspectorPlacement, forKey: .inspectorPlacement)
+        try container.encode(browserPanelWidth, forKey: .browserPanelWidth)
+        try container.encode(inspectorPanelWidth, forKey: .inspectorPanelWidth)
+        try container.encode(viewerPaneHeight, forKey: .viewerPaneHeight)
+        try container.encode(viewerLayout, forKey: .viewerLayout)
+        try container.encode(trackLaneHeight, forKey: .trackLaneHeight)
+        try container.encode(timelineZoom, forKey: .timelineZoom)
+        try container.encode(sourceViewerZoom, forKey: .sourceViewerZoom)
+        try container.encode(programViewerZoom, forKey: .programViewerZoom)
     }
 }
 

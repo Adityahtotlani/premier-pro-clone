@@ -480,6 +480,144 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(soloProgramClip?.assetID, lower.id)
     }
 
+    func testBinManagementFlow() {
+        var project = ProjectFactory.starterProject(name: "Bins")
+        let asset = MediaAsset(name: "Clip", path: "/tmp/bin-clip.mp4", type: .video, duration: 4)
+        project.assets = [asset]
+
+        let workspace = EditorWorkspace(project: project)
+        let initialBinCount = workspace.project.bins.count
+
+        workspace.createBin(named: "Interviews")
+        guard let createdBin = workspace.project.bins.first(where: { $0.name == "Interviews" }) else {
+            XCTFail("Expected newly created bin")
+            return
+        }
+
+        workspace.addAsset(asset.id, toBin: createdBin.id)
+        XCTAssertTrue(
+            workspace.project.bins
+                .first(where: { $0.id == createdBin.id })?
+                .assetIDs
+                .contains(asset.id) ?? false
+        )
+
+        workspace.renameBin(binID: createdBin.id, to: "Interview Selects")
+        XCTAssertEqual(
+            workspace.project.bins.first(where: { $0.id == createdBin.id })?.name,
+            "Interview Selects"
+        )
+
+        workspace.removeAsset(asset.id, fromBin: createdBin.id)
+        XCTAssertFalse(
+            workspace.project.bins
+                .first(where: { $0.id == createdBin.id })?
+                .assetIDs
+                .contains(asset.id) ?? true
+        )
+
+        workspace.deleteBin(binID: createdBin.id)
+        XCTAssertEqual(workspace.project.bins.count, initialBinCount)
+    }
+
+    func testImportSkipsDuplicateMediaAndAvoidsPhantomBinIDs() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("WorkspaceImportDuplicate-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
+        let mediaURL = tempDirectory.appendingPathComponent("clip.mp4")
+        try Data([0x00, 0x01, 0x02, 0x03]).write(to: mediaURL)
+
+        let workspace = EditorWorkspace(project: ProjectFactory.starterProject(name: "ImportDuplicate"))
+        workspace.importMedia(urls: [mediaURL])
+
+        XCTAssertEqual(workspace.project.assets.count, 1)
+        let firstAssetID = workspace.project.assets[0].id
+
+        workspace.importMedia(urls: [mediaURL])
+
+        XCTAssertEqual(workspace.project.assets.count, 1)
+        XCTAssertEqual(workspace.project.assets[0].id, firstAssetID)
+
+        guard let importedBin = workspace.project.bins.first else {
+            XCTFail("Expected at least one bin")
+            return
+        }
+        XCTAssertEqual(importedBin.assetIDs.count, 1)
+        XCTAssertEqual(importedBin.assetIDs.first, firstAssetID)
+    }
+
+    func testImportAddsAssetsOnlyToImportedBin() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("WorkspaceImportBins-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
+        let mediaURL = tempDirectory.appendingPathComponent("clip.mov")
+        try Data([0xAA, 0xBB, 0xCC]).write(to: mediaURL)
+
+        var project = ProjectFactory.starterProject(name: "ImportBins")
+        project.bins = [
+            MediaBin(name: "Imported"),
+            MediaBin(name: "Favorites")
+        ]
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.importMedia(urls: [mediaURL])
+
+        guard let importedBin = workspace.project.bins.first(where: { $0.name == "Imported" }),
+              let favoritesBin = workspace.project.bins.first(where: { $0.name == "Favorites" }),
+              let importedAssetID = workspace.project.assets.first?.id else {
+            XCTFail("Expected imported data")
+            return
+        }
+
+        XCTAssertTrue(importedBin.assetIDs.contains(importedAssetID))
+        XCTAssertFalse(favoritesBin.assetIDs.contains(importedAssetID))
+    }
+
+    func testCSVReportContentIncludesClipRows() {
+        var project = ProjectFactory.starterProject(name: "CSVReport")
+        let asset = MediaAsset(name: "ClipForCSV", path: "/tmp/csv-clip.mp4", type: .video, duration: 4)
+        project.assets = [asset]
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.appendFirstAssetToTimeline()
+
+        guard let csv = workspace.csvReportContent() else {
+            XCTFail("Expected CSV report content")
+            return
+        }
+
+        XCTAssertTrue(csv.contains("section,key,value"))
+        XCTAssertTrue(csv.contains("clip_id,asset_id,asset_name"))
+        XCTAssertTrue(csv.contains("ClipForCSV"))
+    }
+
+    func testPDFReportTextIncludesSummaryAndSections() {
+        var project = ProjectFactory.starterProject(name: "PDFReport")
+        let asset = MediaAsset(name: "ClipForPDF", path: "/tmp/pdf-clip.mp4", type: .video, duration: 4)
+        project.assets = [asset]
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.appendFirstAssetToTimeline()
+        workspace.addMarkerAtPlayhead(label: "Check")
+
+        guard let text = workspace.pdfReportText() else {
+            XCTFail("Expected PDF report text")
+            return
+        }
+
+        XCTAssertTrue(text.contains("PremierClone Sequence Report"))
+        XCTAssertTrue(text.contains("MARKERS"))
+        XCTAssertTrue(text.contains("CAPTIONS"))
+    }
+
     func testPreviewMuteAndVolumeInteraction() {
         let workspace = EditorWorkspace(project: ProjectFactory.starterProject(name: "PreviewAudio"))
         XCTAssertFalse(workspace.isPreviewMuted)

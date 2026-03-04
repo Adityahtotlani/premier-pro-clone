@@ -97,6 +97,15 @@ final class ProjectCoreTests: XCTestCase {
         XCTAssertTrue(project.settings.workspaceLayout.isInspectorPanelVisible)
         XCTAssertEqual(project.settings.workspaceLayout.browserTab, .media)
         XCTAssertEqual(project.settings.workspaceLayout.inspectorTab, .video)
+        XCTAssertEqual(project.settings.workspaceLayout.inspectorPlacement, .right)
+        XCTAssertEqual(project.settings.workspaceLayout.browserPanelWidth, 290, accuracy: 0.0001)
+        XCTAssertEqual(project.settings.workspaceLayout.inspectorPanelWidth, 285, accuracy: 0.0001)
+        XCTAssertEqual(project.settings.workspaceLayout.viewerPaneHeight, 360, accuracy: 0.0001)
+        XCTAssertEqual(project.settings.workspaceLayout.viewerLayout, .auto)
+        XCTAssertEqual(project.settings.workspaceLayout.trackLaneHeight, 54, accuracy: 0.0001)
+        XCTAssertEqual(project.settings.workspaceLayout.timelineZoom, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(project.settings.workspaceLayout.sourceViewerZoom, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(project.settings.workspaceLayout.programViewerZoom, 1.0, accuracy: 0.0001)
     }
 
     func testSaveLoadPersistsWorkspaceLayoutSettings() throws {
@@ -106,7 +115,16 @@ final class ProjectCoreTests: XCTestCase {
             isBrowserPanelVisible: true,
             isInspectorPanelVisible: true,
             browserTab: .timelineIndex,
-            inspectorTab: .captions
+            inspectorTab: .captions,
+            inspectorPlacement: .left,
+            browserPanelWidth: 332,
+            inspectorPanelWidth: 248,
+            viewerPaneHeight: 428,
+            viewerLayout: .stacked,
+            trackLaneHeight: 72,
+            timelineZoom: 1.8,
+            sourceViewerZoom: 1.3,
+            programViewerZoom: 1.1
         )
 
         let store = ProjectStore()

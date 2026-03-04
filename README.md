@@ -39,7 +39,10 @@ A macOS-first open-source non-linear editor prototype inspired by Premiere Pro a
 - Expanded pro workflow features:
   - startup home screen before entering timeline workspace
   - adaptive window scaling: compact layout stacks viewers and keeps toolbars/status usable via horizontal overflow
-  - workspace layout system with Browser/Inspector panel toggles and Editing/Focused/Captions presets, persisted/restored via project settings
+  - workspace layout system with Browser/Inspector panel toggles and Editing/Focused/Captions presets, persisted/restored via project settings (including timeline/viewer zoom)
+  - draggable side panel resizers plus viewer/timeline split resizing, with inspector side placement controls (left/right)
+  - customizable viewer layout modes (`auto`, `side-by-side`, `stacked`) and timeline lane height control
+  - reset workspace action (`Cmd+Opt+0`) to recover a known-good beginner layout
   - working quick actions for new/open/editor flow from home
   - multi-sequence create/duplicate/switch
   - timeline marker add + jump-to-next-marker
@@ -51,8 +54,10 @@ A macOS-first open-source non-linear editor prototype inspired by Premiere Pro a
   - source-range timeline insert + append-to-end actions
   - working preview controls (viewer zoom in/out, mute + volume slider)
   - drag clips from Browser directly onto Timeline (drop-time insertion)
+  - browser bin management for beginners: create/rename/delete bins, drag clips into bins, and filter media by selected bin
   - insert/overwrite timeline edit mode toggle
   - per-track timeline lanes with add/reorder/remove and target/mute/solo/lock controls
+  - timeline clip edge trim handles (drag left/right edge to adjust in/out quickly)
   - keyboard playback commands (`Space`, `,`, `.`, `Cmd+Left`, `Cmd+Right`)
   - JKL shuttle controls (`J` back step, `K` stop, `L` play/2x)
   - timeline keyboard controls for edit mode + track creation (`Cmd+Shift+W`, `Cmd+Opt+Shift+V/A`)
@@ -63,6 +68,7 @@ A macOS-first open-source non-linear editor prototype inspired by Premiere Pro a
   - transcript jump-to-time and program-viewer live caption overlay
   - smart reframe presets (`9:16`, `1:1`, `16:9`) for selected video clips
   - simulated export progress with status + completion history
+  - one-click sequence reporting exports (CSV + PDF) from File menu and toolbar
 
 ## Run tests
 

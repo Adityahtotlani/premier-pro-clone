@@ -46,6 +46,18 @@ struct PremierCloneApplication: App {
                     EditorCommand.post(EditorCommand.importMedia)
                 }
                 .keyboardShortcut("i", modifiers: .command)
+
+                Divider()
+
+                Button("Export CSV Report") {
+                    EditorCommand.post(EditorCommand.exportCSVReport)
+                }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+
+                Button("Export PDF Report") {
+                    EditorCommand.post(EditorCommand.exportPDFReport)
+                }
+                .keyboardShortcut("r", modifiers: [.command, .option, .shift])
             }
 
             CommandMenu("Edit") {
@@ -230,6 +242,18 @@ struct PremierCloneApplication: App {
 
                 Divider()
 
+                Button("Move Inspector Left") {
+                    EditorCommand.post(EditorCommand.moveInspectorLeft)
+                }
+                .keyboardShortcut("[", modifiers: [.command, .option])
+
+                Button("Move Inspector Right") {
+                    EditorCommand.post(EditorCommand.moveInspectorRight)
+                }
+                .keyboardShortcut("]", modifiers: [.command, .option])
+
+                Divider()
+
                 Button("Editing Workspace") {
                     EditorCommand.post(EditorCommand.applyEditingWorkspacePreset)
                 }
@@ -244,6 +268,13 @@ struct PremierCloneApplication: App {
                     EditorCommand.post(EditorCommand.applyCaptionsWorkspacePreset)
                 }
                 .keyboardShortcut("3", modifiers: [.command, .option])
+
+                Divider()
+
+                Button("Reset Workspace Layout") {
+                    EditorCommand.post(EditorCommand.resetWorkspaceLayout)
+                }
+                .keyboardShortcut("0", modifiers: [.command, .option])
 
                 Divider()
 
