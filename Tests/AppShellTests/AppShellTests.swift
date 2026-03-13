@@ -621,6 +621,45 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(workspace.missingAssets.isEmpty)
     }
 
+    func testExportPresetLookupIncludesCreatorPresets() {
+        let workspace = EditorWorkspace(project: ProjectFactory.starterProject(name: "Presets"))
+
+        XCTAssertNotNil(workspace.exportPreset(id: "youtube-1080p-h264"))
+        XCTAssertNotNil(workspace.exportPreset(id: "tiktok-1080x1920-h265"))
+        XCTAssertNotNil(workspace.exportPreset(id: "reels-1080x1920-h264"))
+    }
+
+    func testEnqueueExportUsesRequestedPresetID() {
+        var project = ProjectFactory.starterProject(name: "ExportPreset")
+        let asset = MediaAsset(name: "Clip", path: "/tmp/export-preset.mp4", type: .video, duration: 4)
+        project.assets = [asset]
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.appendFirstAssetToTimeline()
+        workspace.enqueueExport(presetID: "tiktok-1080x1920-h265")
+
+        XCTAssertEqual(workspace.exportStatusMessage, "Rendering tiktok-1080x1920-h265")
+        XCTAssertTrue(workspace.statusMessage.contains("tiktok-1080x1920-h265"))
+    }
+
+    func testCompletedExportCreatesHistoryItem() async throws {
+        var project = ProjectFactory.starterProject(name: "ExportHistory")
+        let asset = MediaAsset(name: "Clip", path: "/tmp/export-history.mp4", type: .video, duration: 4)
+        project.assets = [asset]
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.appendFirstAssetToTimeline()
+        workspace.enqueueExport(presetID: "youtube-1080p-h264")
+        workspace.exportProgress = 0.97
+
+        try await Task.sleep(nanoseconds: 700_000_000)
+
+        XCTAssertEqual(workspace.exportStatusMessage, "Completed")
+        XCTAssertEqual(workspace.exportHistory.count, 1)
+        XCTAssertEqual(workspace.exportHistory.first?.presetID, "youtube-1080p-h264")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: workspace.exportHistory.first?.outputURL.path ?? ""))
+    }
+
     func testPreviewMuteAndVolumeInteraction() {
         let workspace = EditorWorkspace(project: ProjectFactory.starterProject(name: "PreviewAudio"))
         XCTAssertFalse(workspace.isPreviewMuted)

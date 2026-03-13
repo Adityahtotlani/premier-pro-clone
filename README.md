@@ -69,6 +69,7 @@ A macOS-first open-source non-linear editor prototype inspired by Premiere Pro a
   - transcript jump-to-time and program-viewer live caption overlay
   - smart reframe presets (`9:16`, `1:1`, `16:9`) for selected video clips
   - simulated export progress with status + completion history
+  - selectable creator export presets in the editor toolbar, plus proxy manifest generation from the same workflow area
 
 ## Run tests
 

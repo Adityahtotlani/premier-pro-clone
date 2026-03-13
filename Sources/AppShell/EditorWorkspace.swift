@@ -90,6 +90,43 @@ public final class EditorWorkspace: ObservableObject {
         }
     }
 
+    public struct ExportHistoryItem: Identifiable, Equatable, Sendable {
+        public var id: UUID
+        public var jobID: UUID
+        public var sequenceID: UUID
+        public var sequenceName: String
+        public var presetID: String
+        public var presetName: String
+        public var resolution: String
+        public var container: String
+        public var outputURL: URL
+        public var completedAt: Date
+
+        public init(
+            id: UUID = UUID(),
+            jobID: UUID,
+            sequenceID: UUID,
+            sequenceName: String,
+            presetID: String,
+            presetName: String,
+            resolution: String,
+            container: String,
+            outputURL: URL,
+            completedAt: Date = Date()
+        ) {
+            self.id = id
+            self.jobID = jobID
+            self.sequenceID = sequenceID
+            self.sequenceName = sequenceName
+            self.presetID = presetID
+            self.presetName = presetName
+            self.resolution = resolution
+            self.container = container
+            self.outputURL = outputURL
+            self.completedAt = completedAt
+        }
+    }
+
     @Published public var project: Project
     @Published public var statusMessage: String
     @Published public var lastAIArtifact: AIArtifact?
@@ -104,6 +141,7 @@ public final class EditorWorkspace: ObservableObject {
     @Published public var exportProgress: Double
     @Published public var exportStatusMessage: String
     @Published public var completedExports: [RenderJob]
+    @Published public var exportHistory: [ExportHistoryItem]
     @Published public var previewVolume: Double
     @Published public var isPreviewMuted: Bool
     @Published public var playbackRate: Double
@@ -165,6 +203,7 @@ public final class EditorWorkspace: ObservableObject {
         exportProgress = 0
         exportStatusMessage = "Idle"
         completedExports = []
+        exportHistory = []
         previewVolume = 1.0
         isPreviewMuted = false
         playbackRate = 1.0
@@ -230,6 +269,14 @@ public final class EditorWorkspace: ObservableObject {
         project.assets.filter { missingAssetIDs.contains($0.id) }
     }
 
+    public var exportPresets: [ExportPreset] {
+        ExportPresetRegistry.defaultPresets
+    }
+
+    public func exportPreset(id: String) -> ExportPreset? {
+        exportPresets.first(where: { $0.id == id })
+    }
+
     public var playbackRange: (start: TimeInterval, end: TimeInterval)? {
         normalizedPlaybackRange
     }
@@ -292,6 +339,7 @@ public final class EditorWorkspace: ObservableObject {
         exportProgress = 0
         exportStatusMessage = "Idle"
         completedExports = []
+        exportHistory = []
         inPoint = nil
         outPoint = nil
         isLoopPlaybackEnabled = false
@@ -328,6 +376,8 @@ public final class EditorWorkspace: ObservableObject {
             playheadTime = 0
             exportProgress = 0
             exportStatusMessage = "Idle"
+            completedExports = []
+            exportHistory = []
             inPoint = nil
             outPoint = nil
             isLoopPlaybackEnabled = false
@@ -359,6 +409,8 @@ public final class EditorWorkspace: ObservableObject {
                     activeSequenceID = recovered.sequences.first?.id
                     exportProgress = 0
                     exportStatusMessage = "Idle"
+                    completedExports = []
+                    exportHistory = []
                     inPoint = nil
                     outPoint = nil
                     isLoopPlaybackEnabled = false
@@ -1015,6 +1067,29 @@ public final class EditorWorkspace: ObservableObject {
         exportStatusMessage = "Cancelled"
         _ = try? renderEngine.failCurrentJob()
         statusMessage = "Export cancelled"
+    }
+
+    public func retryExport(using item: ExportHistoryItem) {
+        if activeSequenceID != item.sequenceID {
+            setActiveSequence(item.sequenceID)
+        }
+        enqueueExport(presetID: item.presetID)
+    }
+
+    public func openExportOutput(_ item: ExportHistoryItem) {
+        #if canImport(AppKit)
+        NSWorkspace.shared.open(item.outputURL)
+        #else
+        statusMessage = "Open export output is only available on macOS"
+        #endif
+    }
+
+    public func revealExportOutput(_ item: ExportHistoryItem) {
+        #if canImport(AppKit)
+        NSWorkspace.shared.activateFileViewerSelecting([item.outputURL])
+        #else
+        statusMessage = "Reveal export output is only available on macOS"
+        #endif
     }
 
     public func importMedia(urls: [URL]) {
@@ -2417,6 +2492,84 @@ public final class EditorWorkspace: ObservableObject {
         return candidate
     }
 
+    private func exportArtifactsRootURL() -> URL {
+        if let currentProjectBundleURL {
+            let paths = ProjectPaths(bundleURL: currentProjectBundleURL)
+            return paths.cacheDirectoryURL.appendingPathComponent("exports", isDirectory: true)
+        }
+
+        return FileManager.default.temporaryDirectory
+            .appendingPathComponent("PremierCloneExports", isDirectory: true)
+            .appendingPathComponent(project.id.uuidString, isDirectory: true)
+    }
+
+    private func writeExportArtifact(for job: RenderJob, preset: ExportPreset, sequence: EditorSequence) throws -> URL {
+        let fileManager = FileManager.default
+        let rootURL = exportArtifactsRootURL()
+        if !fileManager.fileExists(atPath: rootURL.path) {
+            try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        }
+
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let bundleName = "\(safeFilenameComponent(sequence.name))-\(safeFilenameComponent(preset.name))-\(timestamp)"
+        let bundleURL = rootURL.appendingPathComponent(bundleName, isDirectory: true)
+        try fileManager.createDirectory(at: bundleURL, withIntermediateDirectories: true)
+
+        let receiptURL = bundleURL.appendingPathComponent("export-info.txt", isDirectory: false)
+        let receipt = [
+            "PremierClone Export Bundle",
+            "Project: \(project.name)",
+            "Sequence: \(sequence.name)",
+            "Preset: \(preset.name)",
+            "Resolution: \(preset.resolution)",
+            "Container: \(preset.container.uppercased())",
+            "Codec: \(preset.videoCodec) / \(preset.audioCodec)",
+            "FPS: \(String(format: "%.2f", preset.fps))",
+            "Job ID: \(job.id.uuidString)",
+            "Generated: \(ISO8601DateFormatter().string(from: Date()))"
+        ].joined(separator: "\n")
+        guard let receiptData = receipt.data(using: String.Encoding.utf8) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try receiptData.write(to: receiptURL, options: Data.WritingOptions.atomic)
+
+        return bundleURL
+    }
+
+    private func buildExportHistoryItem(for job: RenderJob) -> ExportHistoryItem? {
+        guard let preset = exportPreset(id: job.presetID),
+              let sequence = project.sequences.first(where: { $0.id == job.sequenceID }) else {
+            return nil
+        }
+
+        do {
+            let outputURL = try writeExportArtifact(for: job, preset: preset, sequence: sequence)
+            return ExportHistoryItem(
+                jobID: job.id,
+                sequenceID: sequence.id,
+                sequenceName: sequence.name,
+                presetID: preset.id,
+                presetName: preset.name,
+                resolution: preset.resolution,
+                container: preset.container,
+                outputURL: outputURL
+            )
+        } catch {
+            statusMessage = "Export artifact write failed: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    private func safeFilenameComponent(_ value: String) -> String {
+        let replaced = value.replacingOccurrences(
+            of: "[^A-Za-z0-9_-]+",
+            with: "-",
+            options: .regularExpression
+        )
+        let trimmed = replaced.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return trimmed.isEmpty ? "untitled" : trimmed
+    }
+
     private func refreshTranscriptMatches() {
         let allSegments = activeSequence?.captionTracks.flatMap(\.segments)
             .sorted(by: { $0.start < $1.start }) ?? []
@@ -2513,6 +2666,9 @@ public final class EditorWorkspace: ObservableObject {
                         self.exportProgressTask = nil
                         if let completed = try? self.renderEngine.completeCurrentJob() {
                             self.completedExports.insert(completed, at: 0)
+                            if let historyItem = self.buildExportHistoryItem(for: completed) {
+                                self.exportHistory.insert(historyItem, at: 0)
+                            }
                         }
                         self.exportStatusMessage = "Completed"
                         self.statusMessage = "Export completed"
@@ -2726,6 +2882,7 @@ public struct EditorRootView: View {
     @State private var viewerPaneHeight: CGFloat = 360
     @State private var viewerLayout: WorkspaceLayoutSettings.ViewerLayout = .auto
     @State private var trackLaneHeight: CGFloat = 54
+    @State private var selectedExportPresetID = "youtube-1080p-h264"
     @State private var timelineZoom: Double = 1.0
     @State private var sourceViewerZoom: Double = 1.0
     @State private var programViewerZoom: Double = 1.0
@@ -2853,6 +3010,10 @@ public struct EditorRootView: View {
 
     private func isAssetMissing(_ asset: MediaAsset) -> Bool {
         workspace.missingAssetIDs.contains(asset.id)
+    }
+
+    private var selectedExportPreset: ExportPreset? {
+        workspace.exportPreset(id: selectedExportPresetID) ?? workspace.exportPresets.first
     }
 
     private var clipCount: Int {
@@ -3546,14 +3707,14 @@ public struct EditorRootView: View {
                 VStack(spacing: 12) {
                     homeCard(title: "Timeline", detail: "\(clipCount) clips in active sequence")
                     homeCard(title: "Captions", detail: "\(captionSegments.count) segments")
-                    homeCard(title: "Exports", detail: "\(workspace.completedExports.count) completed jobs")
+                    homeCard(title: "Exports", detail: "\(workspace.exportHistory.count) recent jobs")
                 }
                 .frame(maxWidth: 840)
             } else {
                 HStack(spacing: 12) {
                     homeCard(title: "Timeline", detail: "\(clipCount) clips in active sequence")
                     homeCard(title: "Captions", detail: "\(captionSegments.count) segments")
-                    homeCard(title: "Exports", detail: "\(workspace.completedExports.count) completed jobs")
+                    homeCard(title: "Exports", detail: "\(workspace.exportHistory.count) recent jobs")
                 }
                 .frame(maxWidth: 840)
             }
@@ -3591,7 +3752,7 @@ public struct EditorRootView: View {
                     }
                     quickStartActionButton("Export", systemImage: "square.and.arrow.up") {
                         enterEditor()
-                        workspace.enqueueExport()
+                        workspace.enqueueExport(presetID: selectedExportPreset?.id ?? "youtube-1080p-h264")
                     }
                 }
             }
@@ -4498,7 +4659,38 @@ public struct EditorRootView: View {
                     toolbarButton("Silence", systemImage: "waveform.and.mic") { workspace.runSilenceSuggestions() }
                     toolbarButton("Reframe 9:16", systemImage: "rectangle.portrait.and.arrow.right") { workspace.applySmartReframePreset("9:16") }
                     toolbarButton("Highlights", systemImage: "sparkles") { workspace.runHighlightSuggestions() }
-                    toolbarButton("Export", systemImage: "square.and.arrow.up") { workspace.enqueueExport() }
+                    Menu {
+                        ForEach(workspace.exportPresets, id: \.id) { preset in
+                            Button {
+                                selectedExportPresetID = preset.id
+                            } label: {
+                                HStack {
+                                    Text(preset.name)
+                                    Spacer()
+                                    if selectedExportPresetID == preset.id {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Label(
+                            "Preset: \(selectedExportPreset?.name ?? "Export")",
+                            systemImage: "gearshape.2"
+                        )
+                        .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(Color(red: 0.40, green: 0.40, blue: 0.43))
+                    toolbarButton(
+                        "Export \(selectedExportPreset?.container.uppercased() ?? "MP4")",
+                        systemImage: "square.and.arrow.up"
+                    ) {
+                        workspace.enqueueExport(presetID: selectedExportPreset?.id ?? "youtube-1080p-h264")
+                    }
+                    toolbarButton("Proxies", systemImage: "externaldrive.badge.icloud") {
+                        workspace.generateProxyManifest()
+                    }
                     if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
                         toolbarButton("Cancel Export", systemImage: "xmark.circle") { workspace.cancelExport() }
                     }
@@ -5357,10 +5549,12 @@ public struct EditorRootView: View {
                             ])
                         }
                         inspectorGroup("Export Queue", rows: [
+                            ("Preset", selectedExportPreset?.name ?? "Default"),
                             ("Status", workspace.exportStatusMessage),
                             ("Progress", "\(Int(workspace.exportProgress * 100))%"),
-                            ("Completed", "\(workspace.completedExports.count)")
+                            ("Completed", "\(workspace.exportHistory.count)")
                         ])
+                        exportHistoryPanel
                     }
 
                     if let artifact = workspace.lastAIArtifact {
@@ -5559,6 +5753,77 @@ public struct EditorRootView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    private var exportHistoryPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Export History")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(workspace.exportHistory.count)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            if workspace.exportHistory.isEmpty {
+                Text("Completed exports will appear here with retry and open actions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(workspace.exportHistory.prefix(6))) { item in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.sequenceName)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                Text("\(item.presetName) • \(item.resolution) • \(item.container.uppercased())")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Text(item.completedAt.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+
+                        HStack(spacing: 6) {
+                            Button("Retry") {
+                                retryExportHistory(item)
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button("Open") {
+                                workspace.openExportOutput(item)
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button("Reveal") {
+                                workspace.revealExportOutput(item)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Color.white.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+            }
+        }
+        .padding(10)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func retryExportHistory(_ item: EditorWorkspace.ExportHistoryItem) {
+        if workspace.activeSequenceID != item.sequenceID {
+            workspace.setActiveSequence(item.sequenceID)
+        }
+        selectedExportPresetID = item.presetID
+        workspace.retryExport(using: item)
+    }
+
     private func effectRow(name: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(name)
@@ -5680,6 +5945,10 @@ public struct EditorRootView: View {
                     .foregroundStyle(.secondary)
 
                 Text("Track H: \(Int(trackLaneHeight))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text("Export Preset: \(selectedExportPreset?.name ?? "Default")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
