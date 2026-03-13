@@ -24,8 +24,6 @@ public enum EditorCommand {
     public static let newProject = Notification.Name("EditorCommand.newProject")
     public static let openProject = Notification.Name("EditorCommand.openProject")
     public static let saveProject = Notification.Name("EditorCommand.saveProject")
-    public static let exportCSVReport = Notification.Name("EditorCommand.exportCSVReport")
-    public static let exportPDFReport = Notification.Name("EditorCommand.exportPDFReport")
     public static let importMedia = Notification.Name("EditorCommand.importMedia")
     public static let appendFirstAsset = Notification.Name("EditorCommand.appendFirstAsset")
     public static let splitFirstClip = Notification.Name("EditorCommand.splitFirstClip")
@@ -220,6 +218,16 @@ public final class EditorWorkspace: ObservableObject {
             return selected
         }
         return project.assets.first
+    }
+
+    public var missingAssetIDs: [UUID] {
+        project.assets
+            .filter { !FileManager.default.fileExists(atPath: $0.path) }
+            .map(\.id)
+    }
+
+    public var missingAssets: [MediaAsset] {
+        project.assets.filter { missingAssetIDs.contains($0.id) }
     }
 
     public var playbackRange: (start: TimeInterval, end: TimeInterval)? {
@@ -1009,88 +1017,6 @@ public final class EditorWorkspace: ObservableObject {
         statusMessage = "Export cancelled"
     }
 
-    public func csvReportContent() -> String? {
-        guard let sequence = activeSequence else { return nil }
-        return buildCSVReport(for: sequence)
-    }
-
-    public func pdfReportText() -> String? {
-        guard let sequence = activeSequence else { return nil }
-        return buildTextReport(for: sequence)
-    }
-
-    public func exportCSVReportUsingDialog() {
-        #if canImport(AppKit)
-        guard let sequence = activeSequence else {
-            statusMessage = "No active sequence to report"
-            return
-        }
-        let content = buildCSVReport(for: sequence)
-        guard let data = content.data(using: .utf8) else {
-            statusMessage = "Could not encode CSV report"
-            return
-        }
-
-        let panel = NSSavePanel()
-        panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "\(defaultReportFileStem(for: sequence)).csv"
-        panel.message = "Choose where to export the CSV report"
-        #if canImport(UniformTypeIdentifiers)
-        if #available(macOS 11.0, *) {
-            panel.allowedContentTypes = [.commaSeparatedText]
-        }
-        #endif
-
-        if panel.runModal() == .OK, let chosenURL = panel.url {
-            let outputURL = reportURL(from: chosenURL, expectedExtension: "csv")
-            do {
-                try data.write(to: outputURL, options: .atomic)
-                statusMessage = "Exported CSV report \(outputURL.lastPathComponent)"
-            } catch {
-                statusMessage = "CSV export failed: \(error.localizedDescription)"
-            }
-        }
-        #else
-        statusMessage = "CSV export is only available on macOS"
-        #endif
-    }
-
-    public func exportPDFReportUsingDialog() {
-        #if canImport(AppKit)
-        guard let sequence = activeSequence else {
-            statusMessage = "No active sequence to report"
-            return
-        }
-        let reportText = buildTextReport(for: sequence)
-        guard let data = buildPDFReportData(from: reportText) else {
-            statusMessage = "Could not render PDF report"
-            return
-        }
-
-        let panel = NSSavePanel()
-        panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "\(defaultReportFileStem(for: sequence)).pdf"
-        panel.message = "Choose where to export the PDF report"
-        #if canImport(UniformTypeIdentifiers)
-        if #available(macOS 11.0, *) {
-            panel.allowedContentTypes = [.pdf]
-        }
-        #endif
-
-        if panel.runModal() == .OK, let chosenURL = panel.url {
-            let outputURL = reportURL(from: chosenURL, expectedExtension: "pdf")
-            do {
-                try data.write(to: outputURL, options: .atomic)
-                statusMessage = "Exported PDF report \(outputURL.lastPathComponent)"
-            } catch {
-                statusMessage = "PDF export failed: \(error.localizedDescription)"
-            }
-        }
-        #else
-        statusMessage = "PDF export is only available on macOS"
-        #endif
-    }
-
     public func importMedia(urls: [URL]) {
         let result = mediaImporter.import(urls: urls)
         guard !result.importedAssets.isEmpty else {
@@ -1787,6 +1713,76 @@ public final class EditorWorkspace: ObservableObject {
         }
     }
 
+    public func relinkAsset(_ assetID: UUID, to newURL: URL) {
+        guard let assetIndex = project.assets.firstIndex(where: { $0.id == assetID }) else {
+            statusMessage = "Asset not found"
+            return
+        }
+
+        let standardizedURL = newURL.standardizedFileURL
+        guard FileManager.default.fileExists(atPath: standardizedURL.path()) else {
+            statusMessage = "Relink target does not exist"
+            return
+        }
+
+        let originalPath = project.assets[assetIndex].path
+        guard originalPath != standardizedURL.path() else {
+            statusMessage = "Asset already points to that file"
+            return
+        }
+
+        recordUndoSnapshot()
+        var updatedProject = project
+        updatedProject.assets[assetIndex].path = standardizedURL.path()
+        project = updatedProject
+        statusMessage = "Relinked \(updatedProject.assets[assetIndex].name)"
+    }
+
+    public func relinkSelectedAssetUsingDialog() {
+        guard let selectedAssetID,
+              let asset = project.assets.first(where: { $0.id == selectedAssetID }) else {
+            statusMessage = "Select an asset in the browser first"
+            return
+        }
+        presentRelinkDialog(for: asset)
+    }
+
+    public func relinkFirstMissingAssetUsingDialog() {
+        guard let asset = missingAssets.first else {
+            statusMessage = "No missing media to relink"
+            return
+        }
+        presentRelinkDialog(for: asset)
+    }
+
+    private func presentRelinkDialog(for asset: MediaAsset) {
+        #if canImport(AppKit)
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose replacement media for \(asset.name)"
+        #if canImport(UniformTypeIdentifiers)
+        switch asset.type {
+        case .video:
+            panel.allowedContentTypes = [.movie]
+        case .audio:
+            panel.allowedContentTypes = [.audio]
+        case .image:
+            panel.allowedContentTypes = [.image]
+        case .unknown:
+            break
+        }
+        #endif
+
+        if panel.runModal() == .OK, let url = panel.url {
+            relinkAsset(asset.id, to: url)
+        }
+        #else
+        statusMessage = "Relink is only available on macOS"
+        #endif
+    }
+
     public func toggleShortcutHelp() {
         showsShortcutHelp.toggle()
     }
@@ -2421,263 +2417,6 @@ public final class EditorWorkspace: ObservableObject {
         return candidate
     }
 
-    private struct ClipReportEntry {
-        var clip: ClipRef
-        var track: TimelineTrack
-        var kind: TrackKind
-    }
-
-    private func clipReportEntries(for sequence: EditorSequence) -> [ClipReportEntry] {
-        var entries: [ClipReportEntry] = []
-
-        for track in sequence.videoTracks {
-            for clip in track.clips {
-                entries.append(ClipReportEntry(clip: clip, track: track, kind: .video))
-            }
-        }
-
-        for track in sequence.audioTracks {
-            for clip in track.clips {
-                entries.append(ClipReportEntry(clip: clip, track: track, kind: .audio))
-            }
-        }
-
-        return entries.sorted {
-            if $0.clip.timelineIn == $1.clip.timelineIn {
-                if $0.kind == $1.kind {
-                    return $0.track.name.localizedCaseInsensitiveCompare($1.track.name) == .orderedAscending
-                }
-                return $0.kind == .video
-            }
-            return $0.clip.timelineIn < $1.clip.timelineIn
-        }
-    }
-
-    private func buildCSVReport(for sequence: EditorSequence) -> String {
-        let assetLookup = Dictionary(uniqueKeysWithValues: project.assets.map { ($0.id, $0) })
-        let markers = sequence.markers.sorted(by: { $0.time < $1.time })
-        let captions = sequence.captionTracks.flatMap(\.segments).sorted(by: { $0.start < $1.start })
-        let clipEntries = clipReportEntries(for: sequence)
-
-        var rows: [String] = []
-        rows.append("section,key,value")
-        rows.append(csvRow(["summary", "project_name", project.name]))
-        rows.append(csvRow(["summary", "project_id", project.id.uuidString]))
-        rows.append(csvRow(["summary", "sequence_name", sequence.name]))
-        rows.append(csvRow(["summary", "sequence_id", sequence.id.uuidString]))
-        rows.append(csvRow(["summary", "sequence_mode", sequence.mode.rawValue]))
-        rows.append(csvRow(["summary", "fps", decimalString(project.fps)]))
-        rows.append(csvRow(["summary", "duration_seconds", decimalString(sequence.duration)]))
-        rows.append(csvRow(["summary", "video_track_count", "\(sequence.videoTracks.count)"]))
-        rows.append(csvRow(["summary", "audio_track_count", "\(sequence.audioTracks.count)"]))
-        rows.append(csvRow(["summary", "clip_count", "\(clipEntries.count)"]))
-        rows.append(csvRow(["summary", "marker_count", "\(markers.count)"]))
-        rows.append(csvRow(["summary", "caption_count", "\(captions.count)"]))
-        rows.append("")
-
-        rows.append("clip_id,asset_id,asset_name,asset_type,track_kind,track_name,track_muted,track_solo,track_locked,timeline_in,timeline_out,clip_duration,source_in,source_out,gain,position_x,position_y,scale_x,scale_y,opacity,effects_count,linked_audio_count")
-        for entry in clipEntries {
-            let asset = assetLookup[entry.clip.assetID]
-            let timelineOut = entry.clip.timelineIn + entry.clip.duration
-            rows.append(
-                csvRow([
-                    entry.clip.id.uuidString,
-                    entry.clip.assetID.uuidString,
-                    asset?.name ?? "Missing Asset",
-                    asset?.type.rawValue ?? "unknown",
-                    entry.kind.rawValue,
-                    entry.track.name,
-                    boolString(entry.track.isMuted),
-                    boolString(entry.track.isSolo),
-                    boolString(isTrackLocked(entry.track.id)),
-                    decimalString(entry.clip.timelineIn),
-                    decimalString(timelineOut),
-                    decimalString(entry.clip.duration),
-                    decimalString(entry.clip.inTime),
-                    decimalString(entry.clip.outTime),
-                    decimalString(entry.clip.gain),
-                    decimalString(entry.clip.transforms.positionX),
-                    decimalString(entry.clip.transforms.positionY),
-                    decimalString(entry.clip.transforms.scaleX),
-                    decimalString(entry.clip.transforms.scaleY),
-                    decimalString(entry.clip.transforms.opacity),
-                    "\(entry.clip.effects.count)",
-                    "\(entry.clip.linkedAudioIDs.count)"
-                ])
-            )
-        }
-        rows.append("")
-
-        rows.append("marker_id,time_seconds,label")
-        for marker in markers {
-            rows.append(csvRow([marker.id.uuidString, decimalString(marker.time), marker.label]))
-        }
-        rows.append("")
-
-        rows.append("caption_id,start_seconds,end_seconds,confidence,text")
-        for segment in captions {
-            rows.append(
-                csvRow([
-                    segment.id.uuidString,
-                    decimalString(segment.start),
-                    decimalString(segment.end),
-                    decimalString(segment.confidence),
-                    segment.text
-                ])
-            )
-        }
-
-        return rows.joined(separator: "\n")
-    }
-
-    private func buildTextReport(for sequence: EditorSequence) -> String {
-        let assetLookup = Dictionary(uniqueKeysWithValues: project.assets.map { ($0.id, $0) })
-        let clipEntries = clipReportEntries(for: sequence)
-        let markers = sequence.markers.sorted(by: { $0.time < $1.time })
-        let captions = sequence.captionTracks.flatMap(\.segments).sorted(by: { $0.start < $1.start })
-
-        var lines: [String] = []
-        lines.append("PremierClone Sequence Report")
-        lines.append("Generated: \(ISO8601DateFormatter().string(from: Date()))")
-        lines.append("")
-        lines.append("Project: \(project.name) (\(project.id.uuidString))")
-        lines.append("Sequence: \(sequence.name) (\(sequence.id.uuidString))")
-        lines.append("Mode: \(sequence.mode.rawValue.capitalized)")
-        lines.append("FPS: \(decimalString(project.fps))")
-        lines.append("Duration: \(timecode(sequence.duration))")
-        lines.append("Video Tracks: \(sequence.videoTracks.count), Audio Tracks: \(sequence.audioTracks.count)")
-        lines.append("Clips: \(clipEntries.count), Markers: \(markers.count), Captions: \(captions.count)")
-        lines.append("")
-        lines.append("CLIPS")
-        lines.append("Timecode In-Out | Track | Asset | Source In-Out | Gain")
-        for entry in clipEntries {
-            let asset = assetLookup[entry.clip.assetID]
-            let timelineOut = entry.clip.timelineIn + entry.clip.duration
-            let clipLabel = "\(timecode(entry.clip.timelineIn))-\(timecode(timelineOut))"
-            let sourceLabel = "\(timecode(entry.clip.inTime))-\(timecode(entry.clip.outTime))"
-            let trackLabel = "\(entry.kind.rawValue.uppercased()) \(entry.track.name)"
-            let assetLabel = asset?.name ?? "Missing Asset"
-            lines.append("\(clipLabel) | \(trackLabel) | \(assetLabel) | \(sourceLabel) | \(decimalString(entry.clip.gain))")
-        }
-        lines.append("")
-        lines.append("MARKERS")
-        if markers.isEmpty {
-            lines.append("None")
-        } else {
-            for marker in markers {
-                lines.append("\(timecode(marker.time))  \(marker.label)")
-            }
-        }
-        lines.append("")
-        lines.append("CAPTIONS")
-        if captions.isEmpty {
-            lines.append("None")
-        } else {
-            for segment in captions {
-                lines.append("\(timecode(segment.start))-\(timecode(segment.end))  \(segment.text)")
-            }
-        }
-
-        return lines.joined(separator: "\n")
-    }
-
-    #if canImport(AppKit)
-    private func buildPDFReportData(from reportText: String) -> Data? {
-        let lines = reportText
-            .components(separatedBy: .newlines)
-            .map { String($0.prefix(220)) }
-        let printableLines = lines.isEmpty ? [""] : lines
-        let pageRect = CGRect(x: 0, y: 0, width: 612, height: 792)
-        let margin: CGFloat = 36
-        let lineHeight: CGFloat = 14
-        let usableHeight = pageRect.height - (margin * 2)
-        let linesPerPage = max(1, Int(floor(usableHeight / lineHeight)))
-        let bodyFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: bodyFont,
-            .foregroundColor: NSColor.black
-        ]
-
-        let pdfData = NSMutableData()
-        guard let dataConsumer = CGDataConsumer(data: pdfData as CFMutableData) else {
-            return nil
-        }
-        var mediaBox = pageRect
-        guard let context = CGContext(consumer: dataConsumer, mediaBox: &mediaBox, nil) else {
-            return nil
-        }
-
-        var lineIndex = 0
-        while lineIndex < printableLines.count {
-            context.beginPDFPage(nil)
-            NSGraphicsContext.saveGraphicsState()
-            let graphicsContext = NSGraphicsContext(cgContext: context, flipped: false)
-            NSGraphicsContext.current = graphicsContext
-
-            var currentY = pageRect.height - margin - lineHeight
-            for _ in 0..<linesPerPage where lineIndex < printableLines.count {
-                let line = printableLines[lineIndex]
-                (line as NSString).draw(at: CGPoint(x: margin, y: currentY), withAttributes: attributes)
-                currentY -= lineHeight
-                lineIndex += 1
-            }
-
-            NSGraphicsContext.restoreGraphicsState()
-            context.endPDFPage()
-        }
-        context.closePDF()
-        return pdfData as Data
-    }
-    #endif
-
-    private func defaultReportFileStem(for sequence: EditorSequence) -> String {
-        "\(safeFilenameToken(project.name))-\(safeFilenameToken(sequence.name))-report"
-    }
-
-    private func safeFilenameToken(_ value: String) -> String {
-        let replaced = value.replacingOccurrences(
-            of: "[^A-Za-z0-9_-]+",
-            with: "-",
-            options: .regularExpression
-        )
-        let trimmed = replaced.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
-        return trimmed.isEmpty ? "untitled" : trimmed
-    }
-
-    private func reportURL(from chosenURL: URL, expectedExtension: String) -> URL {
-        var outputURL = chosenURL
-        let ext = outputURL.pathExtension.lowercased()
-        if ext.isEmpty {
-            outputURL.appendPathExtension(expectedExtension)
-            return outputURL
-        }
-        if ext != expectedExtension.lowercased() {
-            outputURL.deletePathExtension()
-            outputURL.appendPathExtension(expectedExtension)
-        }
-        return outputURL
-    }
-
-    private func csvRow(_ values: [String]) -> String {
-        values.map(csvEscaped).joined(separator: ",")
-    }
-
-    private func csvEscaped(_ value: String) -> String {
-        let escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
-        if escaped.contains(",") || escaped.contains("\"") || escaped.contains("\n") || escaped.contains("\r") {
-            return "\"\(escaped)\""
-        }
-        return escaped
-    }
-
-    private func decimalString(_ value: Double) -> String {
-        String(format: "%.3f", value)
-    }
-
-    private func boolString(_ value: Bool) -> String {
-        value ? "true" : "false"
-    }
-
     private func refreshTranscriptMatches() {
         let allSegments = activeSequence?.captionTracks.flatMap(\.segments)
             .sorted(by: { $0.start < $1.start }) ?? []
@@ -3112,6 +2851,10 @@ public struct EditorRootView: View {
         return selectedBrowserBin.assetIDs.contains(selectedAssetID)
     }
 
+    private func isAssetMissing(_ asset: MediaAsset) -> Bool {
+        workspace.missingAssetIDs.contains(asset.id)
+    }
+
     private var clipCount: Int {
         videoClips.count
     }
@@ -3291,14 +3034,6 @@ public struct EditorRootView: View {
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.saveProject)) { _ in
             enterEditor()
             workspace.saveProject()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.exportCSVReport)) { _ in
-            enterEditor()
-            workspace.exportCSVReportUsingDialog()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.exportPDFReport)) { _ in
-            enterEditor()
-            workspace.exportPDFReportUsingDialog()
         }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.importMedia)) { _ in
             enterEditor()
@@ -4145,6 +3880,15 @@ public struct EditorRootView: View {
                 Text("Browser")
                     .font(.headline)
                 Spacer()
+                if !workspace.missingAssets.isEmpty {
+                    Text("\(workspace.missingAssets.count) missing")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color(red: 0.98, green: 0.78, blue: 0.32))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.orange.opacity(0.16))
+                        .clipShape(Capsule())
+                }
                 Button {
                     workspace.importMediaUsingDialog()
                 } label: {
@@ -4212,6 +3956,12 @@ public struct EditorRootView: View {
                     .padding(.top, 2)
             }
 
+            if !workspace.missingAssets.isEmpty {
+                missingMediaBanner
+                    .padding(.horizontal, 10)
+                    .padding(.top, 2)
+            }
+
             HStack(spacing: 6) {
                 Button("Append Selected") {
                     workspace.appendSelectedAssetToTimeline()
@@ -4265,11 +4015,30 @@ public struct EditorRootView: View {
             List(browserAssets) { asset in
                 HStack(spacing: 8) {
                     Image(systemName: symbol(for: asset.type))
-                        .foregroundStyle(.white.opacity(0.9))
+                        .foregroundStyle(
+                            isAssetMissing(asset) ?
+                            Color(red: 0.98, green: 0.78, blue: 0.32) :
+                            .white.opacity(0.9)
+                        )
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(asset.name)
-                            .foregroundStyle(.white)
-                        Text("\(asset.type.rawValue.capitalized) • \(workspace.timecode(asset.duration))")
+                        HStack(spacing: 6) {
+                            Text(asset.name)
+                                .foregroundStyle(.white)
+                            if isAssetMissing(asset) {
+                                Text("Missing")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Color(red: 0.98, green: 0.78, blue: 0.32))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.orange.opacity(0.16))
+                                    .clipShape(Capsule())
+                            }
+                        }
+                        Text(
+                            isAssetMissing(asset) ?
+                            "Offline media • \(URL(fileURLWithPath: asset.path).lastPathComponent)" :
+                            "\(asset.type.rawValue.capitalized) • \(workspace.timecode(asset.duration))"
+                        )
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -4295,6 +4064,10 @@ public struct EditorRootView: View {
                     workspace.appendAssetToTimeline(assetID: asset.id)
                 }
                 .contextMenu {
+                    Button("Relink Media") {
+                        workspace.selectAsset(asset.id)
+                        workspace.relinkSelectedAssetUsingDialog()
+                    }
                     if showBins, let selectedBrowserBinID {
                         Button("Add to Selected Bin") {
                             workspace.addAsset(asset.id, toBin: selectedBrowserBinID)
@@ -4414,6 +4187,30 @@ public struct EditorRootView: View {
         }
         .padding(10)
         .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var missingMediaBanner: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color(red: 0.98, green: 0.78, blue: 0.32))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Missing media detected")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white)
+                Text("\(workspace.missingAssets.count) asset(s) need relinking before preview/export is reliable.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Relink First Missing") {
+                workspace.relinkFirstMissingAssetUsingDialog()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color(red: 0.70, green: 0.42, blue: 0.18))
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.10))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
@@ -4702,8 +4499,6 @@ public struct EditorRootView: View {
                     toolbarButton("Reframe 9:16", systemImage: "rectangle.portrait.and.arrow.right") { workspace.applySmartReframePreset("9:16") }
                     toolbarButton("Highlights", systemImage: "sparkles") { workspace.runHighlightSuggestions() }
                     toolbarButton("Export", systemImage: "square.and.arrow.up") { workspace.enqueueExport() }
-                    toolbarButton("CSV Report", systemImage: "tablecells") { workspace.exportCSVReportUsingDialog() }
-                    toolbarButton("PDF Report", systemImage: "doc.richtext") { workspace.exportPDFReportUsingDialog() }
                     if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
                         toolbarButton("Cancel Export", systemImage: "xmark.circle") { workspace.cancelExport() }
                     }
@@ -5551,7 +5346,8 @@ public struct EditorRootView: View {
                             ("Audio Clips", "\(audioClips.count)"),
                             ("Captions", "\(captionSegments.count)"),
                             ("Duration", workspace.timecode(activeSequence?.duration ?? 0)),
-                            ("Markers", "\(activeSequence?.markers.count ?? 0)")
+                            ("Markers", "\(activeSequence?.markers.count ?? 0)"),
+                            ("Missing Media", "\(workspace.missingAssets.count)")
                         ])
                         if let selectedClip = workspace.selectedClip {
                             inspectorGroup("Selected Clip", rows: [
@@ -5941,8 +5737,6 @@ public struct EditorRootView: View {
             Text("Cmd+O  Open Project")
             Text("Cmd+S  Save Project")
             Text("Cmd+I  Import Media")
-            Text("Cmd+Shift+R  Export CSV Report")
-            Text("Cmd+Opt+Shift+R  Export PDF Report")
             Text("Cmd+E  Append Selected Asset")
             Text("Cmd+\\  Split Selected Clip")
             Text("Cmd+Shift+Delete  Ripple Delete Selected")
@@ -5954,6 +5748,7 @@ public struct EditorRootView: View {
             Text("Drag Browser clip onto Timeline to insert at drop point")
             Text("Drag clip edges in timeline lanes to trim In/Out")
             Text("Libraries tab: drag clips onto bins to organize media")
+            Text("Missing media banner: use Relink First Missing to restore previews")
             Text("Use Event Viewer In/Out + Insert for subclip editing")
             Text("Toolbar Edit Mode: Insert / Overwrite")
             Text("Timeline lane buttons: Target / Mute / Solo / Lock")

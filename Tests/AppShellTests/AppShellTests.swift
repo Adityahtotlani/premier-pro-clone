@@ -581,41 +581,44 @@ final class AppShellTests: XCTestCase {
         XCTAssertFalse(favoritesBin.assetIDs.contains(importedAssetID))
     }
 
-    func testCSVReportContentIncludesClipRows() {
-        var project = ProjectFactory.starterProject(name: "CSVReport")
-        let asset = MediaAsset(name: "ClipForCSV", path: "/tmp/csv-clip.mp4", type: .video, duration: 4)
-        project.assets = [asset]
+    func testMissingAssetsDetectsOfflineMedia() {
+        var project = ProjectFactory.starterProject(name: "MissingMedia")
+        let missing = MediaAsset(name: "Missing", path: "/tmp/does-not-exist-\(UUID().uuidString).mp4", type: .video, duration: 4)
+        project.assets = [missing]
 
         let workspace = EditorWorkspace(project: project)
-        workspace.appendFirstAssetToTimeline()
 
-        guard let csv = workspace.csvReportContent() else {
-            XCTFail("Expected CSV report content")
-            return
-        }
-
-        XCTAssertTrue(csv.contains("section,key,value"))
-        XCTAssertTrue(csv.contains("clip_id,asset_id,asset_name"))
-        XCTAssertTrue(csv.contains("ClipForCSV"))
+        XCTAssertEqual(workspace.missingAssets.count, 1)
+        XCTAssertEqual(workspace.missingAssets.first?.id, missing.id)
     }
 
-    func testPDFReportTextIncludesSummaryAndSections() {
-        var project = ProjectFactory.starterProject(name: "PDFReport")
-        let asset = MediaAsset(name: "ClipForPDF", path: "/tmp/pdf-clip.mp4", type: .video, duration: 4)
+    func testRelinkAssetUpdatesPathAndClearsMissingState() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("WorkspaceRelink-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
+        let replacementURL = tempDirectory.appendingPathComponent("replacement.mov")
+        try Data([0x01, 0x02, 0x03]).write(to: replacementURL)
+
+        var project = ProjectFactory.starterProject(name: "Relink")
+        let asset = MediaAsset(
+            name: "OfflineClip",
+            path: "/tmp/missing-\(UUID().uuidString).mov",
+            type: .video,
+            duration: 5
+        )
         project.assets = [asset]
 
         let workspace = EditorWorkspace(project: project)
-        workspace.appendFirstAssetToTimeline()
-        workspace.addMarkerAtPlayhead(label: "Check")
+        XCTAssertEqual(workspace.missingAssets.count, 1)
 
-        guard let text = workspace.pdfReportText() else {
-            XCTFail("Expected PDF report text")
-            return
-        }
+        workspace.relinkAsset(asset.id, to: replacementURL)
 
-        XCTAssertTrue(text.contains("PremierClone Sequence Report"))
-        XCTAssertTrue(text.contains("MARKERS"))
-        XCTAssertTrue(text.contains("CAPTIONS"))
+        XCTAssertEqual(workspace.project.assets.first?.path, replacementURL.standardizedFileURL.path())
+        XCTAssertTrue(workspace.missingAssets.isEmpty)
     }
 
     func testPreviewMuteAndVolumeInteraction() {

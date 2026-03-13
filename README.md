@@ -55,6 +55,7 @@ A macOS-first open-source non-linear editor prototype inspired by Premiere Pro a
   - working preview controls (viewer zoom in/out, mute + volume slider)
   - drag clips from Browser directly onto Timeline (drop-time insertion)
   - browser bin management for beginners: create/rename/delete bins, drag clips into bins, and filter media by selected bin
+  - missing-media detection with relink actions surfaced in the Browser
   - insert/overwrite timeline edit mode toggle
   - per-track timeline lanes with add/reorder/remove and target/mute/solo/lock controls
   - timeline clip edge trim handles (drag left/right edge to adjust in/out quickly)
@@ -68,7 +69,6 @@ A macOS-first open-source non-linear editor prototype inspired by Premiere Pro a
   - transcript jump-to-time and program-viewer live caption overlay
   - smart reframe presets (`9:16`, `1:1`, `16:9`) for selected video clips
   - simulated export progress with status + completion history
-  - one-click sequence reporting exports (CSV + PDF) from File menu and toolbar
 
 ## Run tests
 

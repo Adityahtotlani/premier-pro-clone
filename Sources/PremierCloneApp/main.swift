@@ -46,18 +46,6 @@ struct PremierCloneApplication: App {
                     EditorCommand.post(EditorCommand.importMedia)
                 }
                 .keyboardShortcut("i", modifiers: .command)
-
-                Divider()
-
-                Button("Export CSV Report") {
-                    EditorCommand.post(EditorCommand.exportCSVReport)
-                }
-                .keyboardShortcut("r", modifiers: [.command, .shift])
-
-                Button("Export PDF Report") {
-                    EditorCommand.post(EditorCommand.exportPDFReport)
-                }
-                .keyboardShortcut("r", modifiers: [.command, .option, .shift])
             }
 
             CommandMenu("Edit") {
