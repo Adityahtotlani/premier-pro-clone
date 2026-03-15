@@ -660,6 +660,77 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: workspace.exportHistory.first?.outputURL.path ?? ""))
     }
 
+    func testOpenProjectRestoresExportHistoryFromDisk() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PersistedExportHistory-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
+        let bundleURL = tempDirectory.appendingPathComponent("Project.pcloneproj", isDirectory: true)
+
+        var project = ProjectFactory.starterProject(name: "PersistedHistory")
+        let asset = MediaAsset(name: "Clip", path: "/tmp/export-persisted.mp4", type: .video, duration: 4)
+        project.assets = [asset]
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.saveProjectAs(to: bundleURL)
+        workspace.appendFirstAssetToTimeline()
+        workspace.enqueueExport(presetID: "reels-1080x1920-h264")
+        workspace.exportProgress = 0.97
+
+        try await Task.sleep(nanoseconds: 700_000_000)
+
+        XCTAssertEqual(workspace.exportHistory.count, 1)
+
+        let reopened = EditorWorkspace(project: ProjectFactory.starterProject(name: "Reload"))
+        reopened.openProject(at: bundleURL)
+
+        XCTAssertEqual(reopened.exportHistory.count, 1)
+        XCTAssertEqual(reopened.exportHistory.first?.presetID, "reels-1080x1920-h264")
+    }
+
+    func testRestoreLatestAutosaveRestoresProjectState() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RestoreAutosave-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
+        let bundleURL = tempDirectory.appendingPathComponent("Project.pcloneproj", isDirectory: true)
+
+        var project = ProjectFactory.starterProject(name: "AutosaveRestore")
+        let asset = MediaAsset(name: "Clip", path: "/tmp/autosave-restore.mp4", type: .video, duration: 4)
+        project.assets = [asset]
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.saveProjectAs(to: bundleURL)
+        workspace.appendFirstAssetToTimeline()
+
+        let autosaveURL = try ProjectStore().autosave(project: workspace.project, to: bundleURL)
+        XCTAssertEqual(workspace.latestAvailableAutosaveURL?.lastPathComponent, autosaveURL.lastPathComponent)
+
+        workspace.createSequence(named: "Scratch")
+        XCTAssertEqual(workspace.project.sequences.count, 2)
+
+        workspace.restoreLatestAutosave()
+
+        XCTAssertEqual(workspace.project.sequences.count, 1)
+        XCTAssertEqual(workspace.activeSequence?.videoTracks.first?.clips.count, 1)
+        XCTAssertEqual(workspace.lastAutosaveURL?.lastPathComponent, autosaveURL.lastPathComponent)
+        XCTAssertTrue(workspace.statusMessage.contains("Restored latest autosave"))
+    }
+
+    func testRestoreLatestAutosaveRequiresSavedProject() {
+        let workspace = EditorWorkspace(project: ProjectFactory.starterProject(name: "UnsavedAutosave"))
+
+        workspace.restoreLatestAutosave()
+
+        XCTAssertEqual(workspace.statusMessage, "Save or open a project before restoring autosave")
+    }
+
     func testPreviewMuteAndVolumeInteraction() {
         let workspace = EditorWorkspace(project: ProjectFactory.starterProject(name: "PreviewAudio"))
         XCTAssertFalse(workspace.isPreviewMuted)

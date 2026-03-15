@@ -25,6 +25,12 @@ public enum EditorCommand {
     public static let openProject = Notification.Name("EditorCommand.openProject")
     public static let saveProject = Notification.Name("EditorCommand.saveProject")
     public static let importMedia = Notification.Name("EditorCommand.importMedia")
+    public static let generateProxyManifest = Notification.Name("EditorCommand.generateProxyManifest")
+    public static let restoreLatestAutosave = Notification.Name("EditorCommand.restoreLatestAutosave")
+    public static let relinkFirstMissingAsset = Notification.Name("EditorCommand.relinkFirstMissingAsset")
+    public static let retryLatestExport = Notification.Name("EditorCommand.retryLatestExport")
+    public static let openLatestExport = Notification.Name("EditorCommand.openLatestExport")
+    public static let revealLatestExport = Notification.Name("EditorCommand.revealLatestExport")
     public static let appendFirstAsset = Notification.Name("EditorCommand.appendFirstAsset")
     public static let splitFirstClip = Notification.Name("EditorCommand.splitFirstClip")
     public static let rippleDeleteFirstClip = Notification.Name("EditorCommand.rippleDeleteFirstClip")
@@ -90,7 +96,7 @@ public final class EditorWorkspace: ObservableObject {
         }
     }
 
-    public struct ExportHistoryItem: Identifiable, Equatable, Sendable {
+    public struct ExportHistoryItem: Identifiable, Equatable, Codable, Sendable {
         public var id: UUID
         public var jobID: UUID
         public var sequenceID: UUID
@@ -269,6 +275,13 @@ public final class EditorWorkspace: ObservableObject {
         project.assets.filter { missingAssetIDs.contains($0.id) }
     }
 
+    public var latestAvailableAutosaveURL: URL? {
+        guard let currentProjectBundleURL else {
+            return nil
+        }
+        return try? projectStore.latestAutosaveURL(from: currentProjectBundleURL)
+    }
+
     public var exportPresets: [ExportPreset] {
         ExportPresetRegistry.defaultPresets
     }
@@ -360,6 +373,47 @@ public final class EditorWorkspace: ObservableObject {
         refreshTranscriptMatches()
         statusMessage = "Created new project"
         restartAutosaveTimer()
+        exportHistory = []
+    }
+
+    private func applyLoadedProject(
+        _ loaded: Project,
+        bundleURL: URL,
+        status: String,
+        restoredAutosaveURL: URL? = nil
+    ) {
+        project = loaded
+        currentProjectBundleURL = bundleURL
+        lastAutosaveURL = restoredAutosaveURL
+        selectedAssetID = loaded.assets.first?.id
+        selectedClipID = nil
+        activeSequenceID = loaded.sequences.first?.id
+        playheadTime = 0
+        exportProgress = 0
+        exportStatusMessage = "Idle"
+        completedExports = []
+        exportHistory = []
+        inPoint = nil
+        outPoint = nil
+        isLoopPlaybackEnabled = false
+        timelineEditMode = .insert
+        lockedTrackIDs = []
+        targetedVideoTrackID = loaded.sequences.first?.videoTracks.first?.id
+        targetedAudioTrackID = loaded.sequences.first?.audioTracks.first?.id
+        sourcePlayheadTime = 0
+        sourceInPoint = nil
+        sourceOutPoint = nil
+        transcriptQuery = ""
+        transcriptMatches = []
+        selectedCaptionSegmentID = nil
+        silenceSuggestions = []
+        undoHistory = []
+        redoHistory = []
+        lastInspectorSnapshotAt = nil
+        refreshTranscriptMatches()
+        exportHistory = loadExportHistory()
+        statusMessage = status
+        restartAutosaveTimer()
     }
 
     public func openProject(at bundleURL: URL) {
@@ -368,69 +422,19 @@ public final class EditorWorkspace: ObservableObject {
             exportProgressTask = nil
             stopPlaybackLoop()
             let loaded = try projectStore.load(from: bundleURL)
-            project = loaded
-            currentProjectBundleURL = bundleURL
-            selectedAssetID = loaded.assets.first?.id
-            selectedClipID = nil
-            activeSequenceID = loaded.sequences.first?.id
-            playheadTime = 0
-            exportProgress = 0
-            exportStatusMessage = "Idle"
-            completedExports = []
-            exportHistory = []
-            inPoint = nil
-            outPoint = nil
-            isLoopPlaybackEnabled = false
-            timelineEditMode = .insert
-            lockedTrackIDs = []
-            targetedVideoTrackID = project.sequences.first?.videoTracks.first?.id
-            targetedAudioTrackID = project.sequences.first?.audioTracks.first?.id
-            sourcePlayheadTime = 0
-            sourceInPoint = nil
-            sourceOutPoint = nil
-            transcriptQuery = ""
-            transcriptMatches = []
-            selectedCaptionSegmentID = nil
-            silenceSuggestions = []
-            undoHistory = []
-            redoHistory = []
-            lastInspectorSnapshotAt = nil
-            refreshTranscriptMatches()
-            statusMessage = "Opened \(bundleURL.lastPathComponent)"
-            restartAutosaveTimer()
+            applyLoadedProject(loaded, bundleURL: bundleURL, status: "Opened \(bundleURL.lastPathComponent)")
         } catch {
             do {
+                let autosaveURL = try projectStore.latestAutosaveURL(from: bundleURL)
                 if let recovered = try projectStore.recoverLatestAutosave(from: bundleURL) {
                     stopPlaybackLoop()
-                    project = recovered
-                    currentProjectBundleURL = bundleURL
-                    selectedAssetID = recovered.assets.first?.id
-                    selectedClipID = nil
-                    activeSequenceID = recovered.sequences.first?.id
-                    exportProgress = 0
-                    exportStatusMessage = "Idle"
-                    completedExports = []
-                    exportHistory = []
-                    inPoint = nil
-                    outPoint = nil
-                    isLoopPlaybackEnabled = false
-                    timelineEditMode = .insert
-                    lockedTrackIDs = []
-                    targetedVideoTrackID = project.sequences.first?.videoTracks.first?.id
-                    targetedAudioTrackID = project.sequences.first?.audioTracks.first?.id
-                    sourcePlayheadTime = 0
-                    sourceInPoint = nil
-                    sourceOutPoint = nil
-                    transcriptQuery = ""
-                    transcriptMatches = []
-                    selectedCaptionSegmentID = nil
-                    silenceSuggestions = []
-                    undoHistory = []
-                    redoHistory = []
-                    lastInspectorSnapshotAt = nil
-                    refreshTranscriptMatches()
-                    statusMessage = "Recovered latest autosave from \(bundleURL.lastPathComponent)"
-                    restartAutosaveTimer()
+                    let restoredLabel = autosaveURL?.lastPathComponent ?? bundleURL.lastPathComponent
+                    applyLoadedProject(
+                        recovered,
+                        bundleURL: bundleURL,
+                        status: "Recovered latest autosave from \(restoredLabel)",
+                        restoredAutosaveURL: autosaveURL
+                    )
                     return
                 }
                 statusMessage = "Failed to open project: \(error.localizedDescription)"
@@ -458,6 +462,10 @@ public final class EditorWorkspace: ObservableObject {
         do {
             try projectStore.createProjectBundle(at: bundleURL, with: project)
             currentProjectBundleURL = bundleURL
+            let persistedHistory = loadExportHistory()
+            if !persistedHistory.isEmpty || exportHistory.isEmpty {
+                exportHistory = persistedHistory
+            }
             statusMessage = "Saved as \(bundleURL.lastPathComponent)"
             restartAutosaveTimer()
         } catch {
@@ -1076,6 +1084,14 @@ public final class EditorWorkspace: ObservableObject {
         enqueueExport(presetID: item.presetID)
     }
 
+    public func openLatestExport() {
+        guard let item = exportHistory.first else {
+            statusMessage = "No recent export to open"
+            return
+        }
+        openExportOutput(item)
+    }
+
     public func openExportOutput(_ item: ExportHistoryItem) {
         #if canImport(AppKit)
         NSWorkspace.shared.open(item.outputURL)
@@ -1090,6 +1106,47 @@ public final class EditorWorkspace: ObservableObject {
         #else
         statusMessage = "Reveal export output is only available on macOS"
         #endif
+    }
+
+    public func retryLatestExport() {
+        guard let item = exportHistory.first else {
+            statusMessage = "No recent export to retry"
+            return
+        }
+        retryExport(using: item)
+    }
+
+    public func revealLatestExport() {
+        guard let item = exportHistory.first else {
+            statusMessage = "No recent export to reveal"
+            return
+        }
+        revealExportOutput(item)
+    }
+
+    public func restoreLatestAutosave() {
+        guard let bundleURL = currentProjectBundleURL else {
+            statusMessage = "Save or open a project before restoring autosave"
+            return
+        }
+
+        do {
+            guard let autosaveURL = try projectStore.latestAutosaveURL(from: bundleURL),
+                  let recovered = try projectStore.recoverLatestAutosave(from: bundleURL) else {
+                statusMessage = "No autosave available to restore"
+                return
+            }
+
+            stopPlaybackLoop()
+            applyLoadedProject(
+                recovered,
+                bundleURL: bundleURL,
+                status: "Restored latest autosave from \(autosaveURL.lastPathComponent)",
+                restoredAutosaveURL: autosaveURL
+            )
+        } catch {
+            statusMessage = "Autosave restore failed: \(error.localizedDescription)"
+        }
     }
 
     public func importMedia(urls: [URL]) {
@@ -2544,7 +2601,7 @@ public final class EditorWorkspace: ObservableObject {
 
         do {
             let outputURL = try writeExportArtifact(for: job, preset: preset, sequence: sequence)
-            return ExportHistoryItem(
+            let item = ExportHistoryItem(
                 jobID: job.id,
                 sequenceID: sequence.id,
                 sequenceName: sequence.name,
@@ -2554,6 +2611,8 @@ public final class EditorWorkspace: ObservableObject {
                 container: preset.container,
                 outputURL: outputURL
             )
+            try writeExportHistoryMetadata(item)
+            return item
         } catch {
             statusMessage = "Export artifact write failed: \(error.localizedDescription)"
             return nil
@@ -2568,6 +2627,51 @@ public final class EditorWorkspace: ObservableObject {
         )
         let trimmed = replaced.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
         return trimmed.isEmpty ? "untitled" : trimmed
+    }
+
+    private func exportHistoryMetadataURL(for outputURL: URL) -> URL {
+        outputURL.appendingPathComponent("export-history.json", isDirectory: false)
+    }
+
+    private func writeExportHistoryMetadata(_ item: ExportHistoryItem) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(item)
+        try data.write(to: exportHistoryMetadataURL(for: item.outputURL), options: .atomic)
+    }
+
+    private func loadExportHistory() -> [ExportHistoryItem] {
+        guard let currentProjectBundleURL else { return [] }
+
+        let rootURL = ProjectPaths(bundleURL: currentProjectBundleURL)
+            .cacheDirectoryURL
+            .appendingPathComponent("exports", isDirectory: true)
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: rootURL.path) else { return [] }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        do {
+            let bundleURLs = try fileManager.contentsOfDirectory(
+                at: rootURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+
+            let items = bundleURLs.compactMap { bundleURL -> ExportHistoryItem? in
+                let metadataURL = exportHistoryMetadataURL(for: bundleURL)
+                guard fileManager.fileExists(atPath: metadataURL.path) else { return nil }
+                guard let data = try? Data(contentsOf: metadataURL) else { return nil }
+                return try? decoder.decode(ExportHistoryItem.self, from: data)
+            }
+
+            return items.sorted(by: { $0.completedAt > $1.completedAt })
+        } catch {
+            statusMessage = "Export history load failed: \(error.localizedDescription)"
+            return []
+        }
     }
 
     private func refreshTranscriptMatches() {
@@ -3200,6 +3304,32 @@ public struct EditorRootView: View {
             enterEditor()
             workspace.importMediaUsingDialog()
         }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.generateProxyManifest)) { _ in
+            enterEditor()
+            workspace.generateProxyManifest()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.restoreLatestAutosave)) { _ in
+            enterEditor()
+            workspace.restoreLatestAutosave()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.relinkFirstMissingAsset)) { _ in
+            enterEditor()
+            workspace.relinkFirstMissingAssetUsingDialog()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.retryLatestExport)) { _ in
+            enterEditor()
+            if let item = workspace.exportHistory.first {
+                selectedExportPresetID = item.presetID
+            }
+            workspace.retryLatestExport()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.openLatestExport)) { _ in
+            workspace.openLatestExport()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.revealLatestExport)) { _ in
+            enterEditor()
+            workspace.revealLatestExport()
+        }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.appendFirstAsset)) { _ in
             enterEditor()
             workspace.appendFirstAssetToTimeline()
@@ -3719,51 +3849,220 @@ public struct EditorRootView: View {
                 .frame(maxWidth: 840)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Quick Start")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                Text("1. Import media")
-                    .foregroundStyle(.secondary)
-                Text("2. Mark In/Out in Event Viewer and insert")
-                    .foregroundStyle(.secondary)
-                Text("3. Play and trim")
-                    .foregroundStyle(.secondary)
-                Text("4. Generate captions")
-                    .foregroundStyle(.secondary)
-                Text("5. Export for YouTube/TikTok")
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 8) {
-                    quickStartActionButton("Import", systemImage: "tray.and.arrow.down") {
-                        enterEditor()
-                        workspace.importMediaUsingDialog()
-                    }
-                    quickStartActionButton("Insert First Clip", systemImage: "plus.rectangle.on.rectangle") {
-                        enterEditor()
-                        workspace.appendFirstAssetToTimeline()
-                    }
+            if compact {
+                VStack(spacing: 12) {
+                    quickStartHomePanel
+                    projectHealthHomePanel
                 }
-
-                HStack(spacing: 8) {
-                    quickStartActionButton("Captions", systemImage: "captions.bubble") {
-                        enterEditor()
-                        workspace.runAutoCaptions()
-                    }
-                    quickStartActionButton("Export", systemImage: "square.and.arrow.up") {
-                        enterEditor()
-                        workspace.enqueueExport(presetID: selectedExportPreset?.id ?? "youtube-1080p-h264")
-                    }
+            } else {
+                HStack(alignment: .top, spacing: 12) {
+                    quickStartHomePanel
+                    projectHealthHomePanel
                 }
+                .frame(maxWidth: 860)
             }
-            .frame(maxWidth: 420, alignment: .leading)
-            .padding(14)
-            .background(Color.white.opacity(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+
+            if !workspace.exportHistory.isEmpty {
+                recentExportsHomePanel
+                    .frame(maxWidth: 720)
+            }
 
             Spacer()
         }
         .padding(24)
+    }
+
+    private var homeNextStepSummary: String {
+        if workspace.project.assets.isEmpty {
+            return "Import media to start building the first sequence."
+        }
+        if !workspace.missingAssets.isEmpty {
+            return "Relink missing media before preview and export so playback stays reliable."
+        }
+        if clipCount == 0 {
+            return "Insert the first clip to make the timeline editable."
+        }
+        if captionSegments.isEmpty {
+            return "Generate captions next if you want text-based review and silence cleanup."
+        }
+        if workspace.exportHistory.isEmpty {
+            return "Pick a creator preset and export a first draft once the cut feels good."
+        }
+        return "Project is in a healthy state. Resume editing or reopen a recent export."
+    }
+
+    private var quickStartHomePanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Quick Start")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+            Text("1. Import media")
+                .foregroundStyle(.secondary)
+            Text("2. Mark In/Out in Event Viewer and insert")
+                .foregroundStyle(.secondary)
+            Text("3. Play and trim")
+                .foregroundStyle(.secondary)
+            Text("4. Generate captions")
+                .foregroundStyle(.secondary)
+            Text("5. Export for YouTube/TikTok")
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                quickStartActionButton("Import", systemImage: "tray.and.arrow.down") {
+                    enterEditor()
+                    workspace.importMediaUsingDialog()
+                }
+                quickStartActionButton("Insert First Clip", systemImage: "plus.rectangle.on.rectangle") {
+                    enterEditor()
+                    workspace.appendFirstAssetToTimeline()
+                }
+            }
+
+            HStack(spacing: 8) {
+                quickStartActionButton("Captions", systemImage: "captions.bubble") {
+                    enterEditor()
+                    workspace.runAutoCaptions()
+                }
+                quickStartActionButton("Export", systemImage: "square.and.arrow.up") {
+                    enterEditor()
+                    workspace.enqueueExport(presetID: selectedExportPreset?.id ?? "youtube-1080p-h264")
+                }
+            }
+        }
+        .frame(maxWidth: 420, alignment: .leading)
+        .padding(14)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var projectHealthHomePanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Project Health")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+
+            Text(homeNextStepSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            homeStatusRow(
+                title: "Project",
+                detail: workspace.currentProjectBundleURL?.lastPathComponent ?? "Unsaved draft"
+            )
+            homeStatusRow(
+                title: "Autosave",
+                detail: latestAutosaveSummary
+            )
+            homeStatusRow(
+                title: "Missing Media",
+                detail: workspace.missingAssets.isEmpty ? "All files linked" : "\(workspace.missingAssets.count) clips need relink"
+            )
+            homeStatusRow(
+                title: "Prep",
+                detail: workspace.currentProjectBundleURL == nil ? "Save project before writing proxies" : "\(workspace.project.assets.count) assets ready for proxy manifest"
+            )
+
+            HStack(spacing: 8) {
+                quickStartActionButton("Resume", systemImage: "play.rectangle") {
+                    enterEditor()
+                }
+                quickStartActionButton("Restore Autosave", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90") {
+                    enterEditor()
+                    workspace.restoreLatestAutosave()
+                }
+                .disabled(workspace.latestAvailableAutosaveURL == nil)
+            }
+
+            HStack(spacing: 8) {
+                quickStartActionButton("Relink Missing", systemImage: "link.badge.plus") {
+                    enterEditor()
+                    workspace.relinkFirstMissingAssetUsingDialog()
+                }
+                .disabled(workspace.missingAssets.isEmpty)
+
+                quickStartActionButton("Generate Proxies", systemImage: "externaldrive.badge.plus") {
+                    enterEditor()
+                    workspace.generateProxyManifest()
+                }
+                .disabled(workspace.currentProjectBundleURL == nil || workspace.project.assets.isEmpty)
+            }
+
+            HStack(spacing: 8) {
+                quickStartActionButton("Open Last Export", systemImage: "arrow.up.forward.app") {
+                    workspace.openLatestExport()
+                }
+                .disabled(workspace.exportHistory.isEmpty)
+
+                quickStartActionButton("Reveal Last Export", systemImage: "folder") {
+                    workspace.revealLatestExport()
+                }
+                .disabled(workspace.exportHistory.isEmpty)
+            }
+        }
+        .frame(maxWidth: 420, alignment: .leading)
+        .padding(14)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var latestAutosaveSummary: String {
+        guard let autosaveURL = workspace.latestAvailableAutosaveURL ?? workspace.lastAutosaveURL else {
+            return "No autosave available yet"
+        }
+
+        if let modified = try? autosaveURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate {
+            return modified.formatted(date: .abbreviated, time: .shortened)
+        }
+
+        return autosaveURL.lastPathComponent
+    }
+
+    private var recentExportsHomePanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Recent Exports")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Text("\(workspace.exportHistory.count) total")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            ForEach(Array(workspace.exportHistory.prefix(3))) { item in
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.sequenceName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                        Text("\(item.presetName) • \(item.resolution)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Retry") {
+                        enterEditor()
+                        selectedExportPresetID = item.presetID
+                        workspace.retryExport(using: item)
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Open") {
+                        workspace.openExportOutput(item)
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Reveal") {
+                        workspace.revealExportOutput(item)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(10)
+                .background(Color.white.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private func enterEditor() {
@@ -4023,6 +4322,23 @@ public struct EditorRootView: View {
         .padding(12)
         .background(Color.white.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func homeStatusRow(title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 92, alignment: .leading)
+
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(10)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private func quickStartActionButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {

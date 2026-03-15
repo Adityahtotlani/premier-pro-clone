@@ -46,6 +46,35 @@ struct PremierCloneApplication: App {
                     EditorCommand.post(EditorCommand.importMedia)
                 }
                 .keyboardShortcut("i", modifiers: .command)
+
+                Divider()
+
+                Button("Generate Proxy Manifest") {
+                    EditorCommand.post(EditorCommand.generateProxyManifest)
+                }
+                .keyboardShortcut("p", modifiers: [.command, .option])
+
+                Button("Restore Latest Autosave") {
+                    EditorCommand.post(EditorCommand.restoreLatestAutosave)
+                }
+
+                Button("Relink First Missing Media") {
+                    EditorCommand.post(EditorCommand.relinkFirstMissingAsset)
+                }
+
+                Button("Retry Last Export") {
+                    EditorCommand.post(EditorCommand.retryLatestExport)
+                }
+                .keyboardShortcut("r", modifiers: [.command, .option])
+
+                Button("Open Last Export") {
+                    EditorCommand.post(EditorCommand.openLatestExport)
+                }
+
+                Button("Reveal Last Export") {
+                    EditorCommand.post(EditorCommand.revealLatestExport)
+                }
+                .keyboardShortcut("r", modifiers: [.command, .option, .shift])
             }
 
             CommandMenu("Edit") {

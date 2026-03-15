@@ -44,6 +44,7 @@ A macOS-first open-source non-linear editor prototype inspired by Premiere Pro a
   - customizable viewer layout modes (`auto`, `side-by-side`, `stacked`) and timeline lane height control
   - reset workspace action (`Cmd+Opt+0`) to recover a known-good beginner layout
   - working quick actions for new/open/editor flow from home
+  - beginner-facing home "Project Health" panel with autosave restore, relink, proxy, and recent-export actions
   - multi-sequence create/duplicate/switch
   - timeline marker add + jump-to-next-marker
   - previous/next edit-point navigation
@@ -70,6 +71,7 @@ A macOS-first open-source non-linear editor prototype inspired by Premiere Pro a
   - smart reframe presets (`9:16`, `1:1`, `16:9`) for selected video clips
   - simulated export progress with status + completion history
   - selectable creator export presets in the editor toolbar, plus proxy manifest generation from the same workflow area
+  - persisted export history with retry/open/reveal actions for recent jobs
 
 ## Run tests
 

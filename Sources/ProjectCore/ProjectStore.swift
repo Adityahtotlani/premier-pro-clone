@@ -106,22 +106,28 @@ public final class ProjectStore {
         return project
     }
 
-    public func recoverLatestAutosave(from bundleURL: URL) throws -> Project? {
+    public func latestAutosaveURL(from bundleURL: URL) throws -> URL? {
         let paths = ProjectPaths(bundleURL: bundleURL)
         guard fileManager.fileExists(atPath: paths.autosavesDirectoryURL.path()) else {
             return nil
         }
 
-        let autosaves = try fileManager.contentsOfDirectory(at: paths.autosavesDirectoryURL, includingPropertiesForKeys: [.contentModificationDateKey])
+        let autosaves = try fileManager.contentsOfDirectory(
+            at: paths.autosavesDirectoryURL,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        )
 
-        let latest = try autosaves
+        return try autosaves
             .filter { $0.pathExtension.lowercased() == "json" }
             .max { lhs, rhs in
                 let lhsDate = try lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast
                 let rhsDate = try rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast
                 return lhsDate < rhsDate
             }
+    }
 
+    public func recoverLatestAutosave(from bundleURL: URL) throws -> Project? {
+        let latest = try latestAutosaveURL(from: bundleURL)
         guard let latest else {
             return nil
         }
