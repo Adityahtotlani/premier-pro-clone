@@ -133,6 +133,24 @@ public final class EditorWorkspace: ObservableObject {
         }
     }
 
+    public struct RecentProject: Identifiable, Equatable, Codable, Sendable {
+        public var id: UUID
+        public var name: String
+        public var path: String
+        public var lastOpened: Date
+
+        public init(id: UUID = UUID(), name: String, path: String, lastOpened: Date = Date()) {
+            self.id = id
+            self.name = name
+            self.path = path
+            self.lastOpened = lastOpened
+        }
+
+        public var url: URL {
+            URL(fileURLWithPath: path)
+        }
+    }
+
     @Published public var project: Project
     @Published public var statusMessage: String
     @Published public var lastAIArtifact: AIArtifact?
@@ -148,6 +166,7 @@ public final class EditorWorkspace: ObservableObject {
     @Published public var exportStatusMessage: String
     @Published public var completedExports: [RenderJob]
     @Published public var exportHistory: [ExportHistoryItem]
+    @Published public var recentProjects: [RecentProject]
     @Published public var previewVolume: Double
     @Published public var isPreviewMuted: Bool
     @Published public var playbackRate: Double
@@ -174,6 +193,9 @@ public final class EditorWorkspace: ObservableObject {
     private let projectStore: ProjectStore
     private let mediaImporter: MediaImporter
     private let proxyManager: ProxyManager
+    private let userDefaults: UserDefaults
+    private let recentProjectsKey = "PremierClone.RecentProjects"
+    private let recentProjectsLimit = 8
     private var autosaveTimer: Timer?
     private var exportProgressTask: Task<Void, Never>?
     private var playbackTask: Task<Void, Never>?
@@ -189,7 +211,8 @@ public final class EditorWorkspace: ObservableObject {
         aiService: AIAssistService = AIAssistService(),
         projectStore: ProjectStore = ProjectStore(),
         mediaImporter: MediaImporter = MediaImporter(),
-        proxyManager: ProxyManager = ProxyManager()
+        proxyManager: ProxyManager = ProxyManager(),
+        userDefaults: UserDefaults = .standard
     ) {
         self.project = project
         self.timelineEngine = timelineEngine
@@ -199,6 +222,7 @@ public final class EditorWorkspace: ObservableObject {
         self.projectStore = projectStore
         self.mediaImporter = mediaImporter
         self.proxyManager = proxyManager
+        self.userDefaults = userDefaults
 
         statusMessage = "Ready"
         playheadTime = 0
@@ -210,6 +234,7 @@ public final class EditorWorkspace: ObservableObject {
         exportStatusMessage = "Idle"
         completedExports = []
         exportHistory = []
+        recentProjects = []
         previewVolume = 1.0
         isPreviewMuted = false
         playbackRate = 1.0
@@ -230,6 +255,7 @@ public final class EditorWorkspace: ObservableObject {
         undoHistory = []
         redoHistory = []
         lastInspectorSnapshotAt = nil
+        recentProjects = loadRecentProjects()
         refreshTranscriptMatches()
     }
 
@@ -412,6 +438,7 @@ public final class EditorWorkspace: ObservableObject {
         lastInspectorSnapshotAt = nil
         refreshTranscriptMatches()
         exportHistory = loadExportHistory()
+        registerRecentProject(bundleURL: bundleURL, name: loaded.name)
         statusMessage = status
         restartAutosaveTimer()
     }
@@ -466,6 +493,7 @@ public final class EditorWorkspace: ObservableObject {
             if !persistedHistory.isEmpty || exportHistory.isEmpty {
                 exportHistory = persistedHistory
             }
+            registerRecentProject(bundleURL: bundleURL, name: project.name)
             statusMessage = "Saved as \(bundleURL.lastPathComponent)"
             restartAutosaveTimer()
         } catch {
@@ -1299,6 +1327,53 @@ public final class EditorWorkspace: ObservableObject {
         let binName = updatedProject.bins[binIndex].name
         project = updatedProject
         statusMessage = "Removed asset from \(binName)"
+    }
+
+    public func moveAsset(_ assetID: UUID, inBin binID: UUID, before targetID: UUID? = nil) {
+        guard project.assets.contains(where: { $0.id == assetID }) else {
+            statusMessage = "Asset not found"
+            return
+        }
+        guard let binIndex = project.bins.firstIndex(where: { $0.id == binID }) else {
+            statusMessage = "Bin not found"
+            return
+        }
+
+        var ids = project.bins[binIndex].assetIDs
+        guard let fromIndex = ids.firstIndex(of: assetID) else {
+            recordUndoSnapshot()
+            var updatedProject = project
+            if let targetID, let targetIndex = ids.firstIndex(of: targetID) {
+                ids.insert(assetID, at: targetIndex)
+            } else {
+                ids.append(assetID)
+            }
+            updatedProject.bins[binIndex].assetIDs = ids
+            project = updatedProject
+            statusMessage = "Added asset to \(project.bins[binIndex].name)"
+            return
+        }
+
+        if let targetID, targetID == assetID {
+            statusMessage = "Asset already positioned"
+            return
+        }
+
+        recordUndoSnapshot()
+        ids.remove(at: fromIndex)
+
+        let insertIndex: Int
+        if let targetID, let targetIndex = ids.firstIndex(of: targetID) {
+            insertIndex = targetIndex
+        } else {
+            insertIndex = ids.count
+        }
+
+        ids.insert(assetID, at: insertIndex)
+        var updatedProject = project
+        updatedProject.bins[binIndex].assetIDs = ids
+        project = updatedProject
+        statusMessage = "Reordered assets in \(project.bins[binIndex].name)"
     }
 
     public func selectClip(_ clipID: UUID?) {
@@ -2674,6 +2749,71 @@ public final class EditorWorkspace: ObservableObject {
         }
     }
 
+    private func loadRecentProjects() -> [RecentProject] {
+        guard let data = userDefaults.data(forKey: recentProjectsKey) else {
+            return []
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let decoded = try? decoder.decode([RecentProject].self, from: data) else {
+            return []
+        }
+
+        let fileManager = FileManager.default
+        return decoded
+            .filter { fileManager.fileExists(atPath: $0.path) }
+            .sorted(by: { $0.lastOpened > $1.lastOpened })
+    }
+
+    private func persistRecentProjects(_ projects: [RecentProject]) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(projects) else { return }
+        userDefaults.set(data, forKey: recentProjectsKey)
+    }
+
+    private func registerRecentProject(bundleURL: URL, name: String) {
+        let standardizedPath = bundleURL.standardizedFileURL.path
+        var updated = recentProjects.filter { $0.path != standardizedPath }
+        updated.insert(RecentProject(name: name, path: standardizedPath, lastOpened: Date()), at: 0)
+
+        if updated.count > recentProjectsLimit {
+            updated = Array(updated.prefix(recentProjectsLimit))
+        }
+
+        recentProjects = updated
+        persistRecentProjects(updated)
+    }
+
+    public func openRecentProject(_ recent: RecentProject) {
+        let url = recent.url
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            statusMessage = "Recent project not found"
+            removeRecentProject(recent)
+            return
+        }
+        openProject(at: url)
+    }
+
+    public func removeRecentProject(_ recent: RecentProject) {
+        recentProjects.removeAll { $0.id == recent.id }
+        persistRecentProjects(recentProjects)
+    }
+
+    public func clearRecentProjects() {
+        recentProjects = []
+        userDefaults.removeObject(forKey: recentProjectsKey)
+    }
+
+    public func revealRecentProject(_ recent: RecentProject) {
+        #if canImport(AppKit)
+        let url = recent.url
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+        #else
+        statusMessage = "Reveal project is only available on macOS"
+        #endif
+    }
+
     private func refreshTranscriptMatches() {
         let allSegments = activeSequence?.captionTracks.flatMap(\.segments)
             .sorted(by: { $0.start < $1.start }) ?? []
@@ -3862,6 +4002,11 @@ public struct EditorRootView: View {
                 .frame(maxWidth: 860)
             }
 
+            if !workspace.recentProjects.isEmpty {
+                recentProjectsHomePanel
+                    .frame(maxWidth: 720)
+            }
+
             if !workspace.exportHistory.isEmpty {
                 recentExportsHomePanel
                     .frame(maxWidth: 720)
@@ -4063,6 +4208,70 @@ public struct EditorRootView: View {
         .padding(14)
         .background(Color.white.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var recentProjectsHomePanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Recent Projects")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Button("Clear") {
+                    workspace.clearRecentProjects()
+                }
+                .buttonStyle(.bordered)
+            }
+
+            ForEach(Array(workspace.recentProjects.prefix(5))) { recent in
+                let exists = FileManager.default.fileExists(atPath: recent.path)
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(recent.name)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                        Text(recentProjectDetail(recent))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if !exists {
+                        Text("Missing")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Color(red: 0.98, green: 0.78, blue: 0.32))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.16))
+                            .clipShape(Capsule())
+                    }
+                    Button("Open") {
+                        enterEditor()
+                        workspace.openRecentProject(recent)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!exists)
+                    Button("Reveal") {
+                        workspace.revealRecentProject(recent)
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Remove") {
+                        workspace.removeRecentProject(recent)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(10)
+                .background(Color.white.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func recentProjectDetail(_ recent: EditorWorkspace.RecentProject) -> String {
+        let filename = URL(fileURLWithPath: recent.path).lastPathComponent
+        return "\(filename) • \(recent.lastOpened.formatted(date: .abbreviated, time: .shortened))"
     }
 
     private func enterEditor() {
@@ -4557,6 +4766,26 @@ public struct EditorRootView: View {
                     }
                 }
                 .draggable(asset.id.uuidString)
+                .dropDestination(for: String.self) { items, _ in
+                    guard showBins,
+                          let selectedBrowserBinID,
+                          let rawID = items.first,
+                          let draggedID = UUID(uuidString: rawID) else {
+                        return false
+                    }
+                    workspace.moveAsset(draggedID, inBin: selectedBrowserBinID, before: asset.id)
+                    return true
+                }
+            }
+            .dropDestination(for: String.self) { items, _ in
+                guard showBins,
+                      let selectedBrowserBinID,
+                      let rawID = items.first,
+                      let draggedID = UUID(uuidString: rawID) else {
+                    return false
+                }
+                workspace.moveAsset(draggedID, inBin: selectedBrowserBinID, before: nil)
+                return true
             }
         }
     }

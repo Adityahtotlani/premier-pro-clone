@@ -520,6 +520,22 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(workspace.project.bins.count, initialBinCount)
     }
 
+    func testReorderAssetsWithinBin() {
+        var project = ProjectFactory.starterProject(name: "BinReorder")
+        let assetA = MediaAsset(name: "A", path: "/tmp/bin-a.mp4", type: .video, duration: 4)
+        let assetB = MediaAsset(name: "B", path: "/tmp/bin-b.mp4", type: .video, duration: 4)
+        let assetC = MediaAsset(name: "C", path: "/tmp/bin-c.mp4", type: .video, duration: 4)
+        project.assets = [assetA, assetB, assetC]
+        project.bins = [MediaBin(name: "Imported", assetIDs: [assetA.id, assetB.id, assetC.id])]
+
+        let workspace = EditorWorkspace(project: project)
+
+        workspace.moveAsset(assetC.id, inBin: project.bins[0].id, before: assetA.id)
+
+        let ordered = workspace.project.bins[0].assetIDs
+        XCTAssertEqual(ordered, [assetC.id, assetA.id, assetB.id])
+    }
+
     func testImportSkipsDuplicateMediaAndAvoidsPhantomBinIDs() throws {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("WorkspaceImportDuplicate-\(UUID().uuidString)", isDirectory: true)
@@ -689,6 +705,36 @@ final class AppShellTests: XCTestCase {
 
         XCTAssertEqual(reopened.exportHistory.count, 1)
         XCTAssertEqual(reopened.exportHistory.first?.presetID, "reels-1080x1920-h264")
+    }
+
+    func testRecentProjectsUpdatesOnSaveAndOpen() throws {
+        let suiteName = "RecentProjectsTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RecentProjects-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
+        let bundleURL = tempDirectory.appendingPathComponent("Project.pcloneproj", isDirectory: true)
+        let project = ProjectFactory.starterProject(name: "RecentProject")
+
+        let workspace = EditorWorkspace(project: project, userDefaults: defaults)
+        workspace.saveProjectAs(to: bundleURL)
+
+        XCTAssertEqual(workspace.recentProjects.count, 1)
+        XCTAssertEqual(workspace.recentProjects.first?.path, bundleURL.standardizedFileURL.path)
+
+        let reopened = EditorWorkspace(project: ProjectFactory.starterProject(name: "Reload"), userDefaults: defaults)
+        reopened.openProject(at: bundleURL)
+
+        XCTAssertEqual(reopened.recentProjects.count, 1)
+        XCTAssertEqual(reopened.recentProjects.first?.path, bundleURL.standardizedFileURL.path)
     }
 
     func testRestoreLatestAutosaveRestoresProjectState() throws {
