@@ -106,6 +106,7 @@ public final class EditorWorkspace: ObservableObject {
         public var resolution: String
         public var container: String
         public var outputURL: URL
+        public var outputFileName: String?
         public var completedAt: Date
 
         public init(
@@ -118,6 +119,7 @@ public final class EditorWorkspace: ObservableObject {
             resolution: String,
             container: String,
             outputURL: URL,
+            outputFileName: String? = nil,
             completedAt: Date = Date()
         ) {
             self.id = id
@@ -129,6 +131,7 @@ public final class EditorWorkspace: ObservableObject {
             self.resolution = resolution
             self.container = container
             self.outputURL = outputURL
+            self.outputFileName = outputFileName
             self.completedAt = completedAt
         }
     }
@@ -1124,7 +1127,7 @@ public final class EditorWorkspace: ObservableObject {
 
     public func openExportOutput(_ item: ExportHistoryItem) {
         #if canImport(AppKit)
-        NSWorkspace.shared.open(item.outputURL)
+        NSWorkspace.shared.open(exportOutputURL(for: item))
         #else
         statusMessage = "Open export output is only available on macOS"
         #endif
@@ -1132,7 +1135,7 @@ public final class EditorWorkspace: ObservableObject {
 
     public func revealExportOutput(_ item: ExportHistoryItem) {
         #if canImport(AppKit)
-        NSWorkspace.shared.activateFileViewerSelecting([item.outputURL])
+        NSWorkspace.shared.activateFileViewerSelecting([exportOutputURL(for: item)])
         #else
         statusMessage = "Reveal export output is only available on macOS"
         #endif
@@ -1406,6 +1409,16 @@ public final class EditorWorkspace: ObservableObject {
     public func clearClipSelection() {
         selectedClipID = nil
         selectedClipIDs = []
+    }
+
+    private func resolvedSelectedClipIDs() -> Set<UUID> {
+        if !selectedClipIDs.isEmpty {
+            return selectedClipIDs
+        }
+        if let selectedClipID {
+            return [selectedClipID]
+        }
+        return []
     }
 
     public func selectAsset(_ assetID: UUID?) {
@@ -1892,11 +1905,132 @@ public final class EditorWorkspace: ObservableObject {
     }
 
     public func rippleDeleteSelectedClip() {
+        let selectedIDs = resolvedSelectedClipIDs()
+        if selectedIDs.count > 1 {
+            rippleDeleteSelectedClips()
+            return
+        }
         guard clipSelection != nil else {
             statusMessage = "Select a clip first"
             return
         }
         rippleDeleteSelectedOrFirstClip()
+    }
+
+    public func rippleDeleteSelectedClips() {
+        guard let sequence = activeSequence else {
+            statusMessage = "No active sequence"
+            return
+        }
+
+        let selectedIDs = resolvedSelectedClipIDs()
+        guard !selectedIDs.isEmpty else {
+            statusMessage = "Select clips first"
+            return
+        }
+
+        let targets = clipTargets(for: selectedIDs, in: sequence)
+        guard !targets.isEmpty else {
+            statusMessage = "Select clips first"
+            return
+        }
+
+        let unlocked = targets.filter { !isTrackLocked($0.trackID) }
+        guard !unlocked.isEmpty else {
+            statusMessage = "Track is locked"
+            return
+        }
+
+        recordUndoSnapshot()
+        var workingProject = project
+        var deleteCount = 0
+
+        for target in unlocked.sorted(by: { $0.clip.timelineIn > $1.clip.timelineIn }) {
+            do {
+                let result = try timelineEngine.apply(
+                    operation: .rippleDelete(
+                        sequenceID: sequence.id,
+                        trackID: target.trackID,
+                        trackKind: target.kind,
+                        clipID: target.clip.id
+                    ),
+                    to: workingProject
+                )
+                workingProject = result.0
+                deleteCount += 1
+            } catch {
+                continue
+            }
+        }
+
+        guard deleteCount > 0 else {
+            statusMessage = "No clips deleted"
+            return
+        }
+
+        project = workingProject
+        let deletedIDs = Set(unlocked.map(\.clip.id))
+        selectedClipIDs.subtract(deletedIDs)
+        syncPrimarySelection()
+        sanitizeSelectedClip()
+        statusMessage = deleteCount > 1 ? "Ripple deleted \(deleteCount) clips" : "Ripple deleted clip"
+    }
+
+    public func nudgeSelectedClips(by seconds: TimeInterval) {
+        guard let sequence = activeSequence else {
+            statusMessage = "No active sequence"
+            return
+        }
+
+        let selectedIDs = resolvedSelectedClipIDs()
+        guard !selectedIDs.isEmpty else {
+            statusMessage = "Select clips to nudge"
+            return
+        }
+
+        let targets = clipTargets(for: selectedIDs, in: sequence)
+        guard !targets.isEmpty else {
+            statusMessage = "Select clips to nudge"
+            return
+        }
+
+        recordUndoSnapshot()
+        var workingProject = project
+        var moveCount = 0
+
+        for target in targets {
+            guard !isTrackLocked(target.trackID) else {
+                continue
+            }
+            let newTime = max(0, target.clip.timelineIn + seconds)
+            if abs(newTime - target.clip.timelineIn) < 0.0001 {
+                continue
+            }
+            do {
+                let result = try timelineEngine.apply(
+                    operation: .moveClip(
+                        sequenceID: sequence.id,
+                        trackID: target.trackID,
+                        trackKind: target.kind,
+                        clipID: target.clip.id,
+                        newTimelineIn: newTime
+                    ),
+                    to: workingProject
+                )
+                workingProject = result.0
+                moveCount += 1
+            } catch {
+                continue
+            }
+        }
+
+        guard moveCount > 0 else {
+            statusMessage = "No clips moved"
+            return
+        }
+
+        project = workingProject
+        statusMessage = moveCount > 1 ? "Nudged \(moveCount) clips" : "Nudged clip"
     }
 
     public func updateSelectedClipPositionX(_ value: Double) {
@@ -2656,6 +2790,11 @@ public final class EditorWorkspace: ObservableObject {
         return candidate
     }
 
+    private struct ExportArtifact {
+        let bundleURL: URL
+        let outputFileURL: URL
+    }
+
     private func exportArtifactsRootURL() -> URL {
         if let currentProjectBundleURL {
             let paths = ProjectPaths(bundleURL: currentProjectBundleURL)
@@ -2667,7 +2806,7 @@ public final class EditorWorkspace: ObservableObject {
             .appendingPathComponent(project.id.uuidString, isDirectory: true)
     }
 
-    private func writeExportArtifact(for job: RenderJob, preset: ExportPreset, sequence: EditorSequence) throws -> URL {
+    private func writeExportArtifact(for job: RenderJob, preset: ExportPreset, sequence: EditorSequence) throws -> ExportArtifact {
         let fileManager = FileManager.default
         let rootURL = exportArtifactsRootURL()
         if !fileManager.fileExists(atPath: rootURL.path) {
@@ -2679,6 +2818,8 @@ public final class EditorWorkspace: ObservableObject {
         let bundleURL = rootURL.appendingPathComponent(bundleName, isDirectory: true)
         try fileManager.createDirectory(at: bundleURL, withIntermediateDirectories: true)
 
+        let outputFileName = "export.\(preset.container.lowercased())"
+        let outputFileURL = bundleURL.appendingPathComponent(outputFileName, isDirectory: false)
         let receiptURL = bundleURL.appendingPathComponent("export-info.txt", isDirectory: false)
         let receipt = [
             "PremierClone Export Bundle",
@@ -2690,6 +2831,7 @@ public final class EditorWorkspace: ObservableObject {
             "Codec: \(preset.videoCodec) / \(preset.audioCodec)",
             "FPS: \(String(format: "%.2f", preset.fps))",
             "Job ID: \(job.id.uuidString)",
+            "Output: \(outputFileName)",
             "Generated: \(ISO8601DateFormatter().string(from: Date()))"
         ].joined(separator: "\n")
         guard let receiptData = receipt.data(using: String.Encoding.utf8) else {
@@ -2697,17 +2839,16 @@ public final class EditorWorkspace: ObservableObject {
         }
         try receiptData.write(to: receiptURL, options: Data.WritingOptions.atomic)
 
-        return bundleURL
+        return ExportArtifact(bundleURL: bundleURL, outputFileURL: outputFileURL)
     }
 
-    private func buildExportHistoryItem(for job: RenderJob) -> ExportHistoryItem? {
+    private func buildExportHistoryItem(for job: RenderJob, artifact: ExportArtifact) -> ExportHistoryItem? {
         guard let preset = exportPreset(id: job.presetID),
               let sequence = project.sequences.first(where: { $0.id == job.sequenceID }) else {
             return nil
         }
 
         do {
-            let outputURL = try writeExportArtifact(for: job, preset: preset, sequence: sequence)
             let item = ExportHistoryItem(
                 jobID: job.id,
                 sequenceID: sequence.id,
@@ -2716,7 +2857,8 @@ public final class EditorWorkspace: ObservableObject {
                 presetName: preset.name,
                 resolution: preset.resolution,
                 container: preset.container,
-                outputURL: outputURL
+                outputURL: artifact.bundleURL,
+                outputFileName: artifact.outputFileURL.lastPathComponent
             )
             try writeExportHistoryMetadata(item)
             return item
@@ -2738,6 +2880,17 @@ public final class EditorWorkspace: ObservableObject {
 
     private func exportHistoryMetadataURL(for outputURL: URL) -> URL {
         outputURL.appendingPathComponent("export-history.json", isDirectory: false)
+    }
+
+    private func exportOutputURL(for item: ExportHistoryItem) -> URL {
+        guard let outputFileName = item.outputFileName else {
+            return item.outputURL
+        }
+        let fileURL = item.outputURL.appendingPathComponent(outputFileName, isDirectory: false)
+        if FileManager.default.fileExists(atPath: fileURL.path()) {
+            return fileURL
+        }
+        return item.outputURL
     }
 
     private func writeExportHistoryMetadata(_ item: ExportHistoryItem) throws {
@@ -3157,6 +3310,25 @@ public final class EditorWorkspace: ObservableObject {
         }
         selectedClipID = selectedClipIDs.first
     }
+
+    private func clipTargets(
+        for clipIDs: Set<UUID>,
+        in sequence: EditorSequence
+    ) -> [(clip: ClipRef, trackID: UUID, kind: TrackKind)] {
+        guard !clipIDs.isEmpty else { return [] }
+        var results: [(clip: ClipRef, trackID: UUID, kind: TrackKind)] = []
+        for track in sequence.videoTracks {
+            for clip in track.clips where clipIDs.contains(clip.id) {
+                results.append((clip, track.id, .video))
+            }
+        }
+        for track in sequence.audioTracks {
+            for clip in track.clips where clipIDs.contains(clip.id) {
+                results.append((clip, track.id, .audio))
+            }
+        }
+        return results
+    }
 }
 
 public struct EditorRootView: View {
@@ -3184,6 +3356,7 @@ public struct EditorRootView: View {
     @State private var editingBrowserBinName = ""
     @State private var draggingClipID: UUID?
     @State private var dragTranslationX: CGFloat = 0
+    @State private var isGroupDragging = false
     @State private var marqueeTrackID: UUID?
     @State private var marqueeTrackKind: TrackKind?
     @State private var marqueeStartX: CGFloat?
@@ -5253,8 +5426,8 @@ public struct EditorRootView: View {
                         workspace.toggleLoopPlayback()
                     }
                     Divider().frame(height: 18)
-                    toolbarButton("Nudge -", systemImage: "arrow.left") { workspace.nudgeSelectedClip(by: -0.5) }
-                    toolbarButton("Nudge +", systemImage: "arrow.right") { workspace.nudgeSelectedClip(by: 0.5) }
+                    toolbarButton("Nudge -", systemImage: "arrow.left") { workspace.nudgeSelectedClips(by: -0.5) }
+                    toolbarButton("Nudge +", systemImage: "arrow.right") { workspace.nudgeSelectedClips(by: 0.5) }
                     toolbarButton("Trim In", systemImage: "arrow.right.to.line.compact") { workspace.trimSelectedClipLeading(by: 0.1) }
                     toolbarButton("Trim Out", systemImage: "arrow.left.to.line.compact") { workspace.trimSelectedClipTrailing(by: 0.1) }
                     toolbarButton("Delete Sel", systemImage: "trash") { workspace.rippleDeleteSelectedClip() }
@@ -5911,6 +6084,7 @@ public struct EditorRootView: View {
                 }
 
                 ForEach(sortedClips) { clip in
+                    let isSelected = workspace.selectedClipIDs.contains(clip.id)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(assetName(for: clip))
                             .font(.caption2.weight(.semibold))
@@ -5966,7 +6140,9 @@ public struct EditorRootView: View {
                         }
                     }
                     .offset(
-                        x: xPosition(for: clip.timelineIn) + (draggingClipID == clip.id ? dragTranslationX : 0),
+                        x: xPosition(for: clip.timelineIn) + (
+                            (isGroupDragging && isSelected) || draggingClipID == clip.id ? dragTranslationX : 0
+                        ),
                         y: trackClipVerticalInset
                     )
                     .onTapGesture {
@@ -6005,21 +6181,32 @@ public struct EditorRootView: View {
                         DragGesture(minimumDistance: 3)
                             .onChanged { gesture in
                                 guard !isLocked else { return }
-                                workspace.selectClip(clip.id)
+                                if isSelected {
+                                    workspace.selectClips(Array(workspace.selectedClipIDs), primary: clip.id)
+                                } else {
+                                    workspace.selectClip(clip.id)
+                                }
                                 draggingClipID = clip.id
                                 dragTranslationX = gesture.translation.width
+                                isGroupDragging = workspace.selectedClipIDs.count > 1
                             }
                             .onEnded { gesture in
                                 guard !isLocked else {
                                     draggingClipID = nil
                                     dragTranslationX = 0
+                                    isGroupDragging = false
                                     return
                                 }
                                 let seconds = snappedTimelineDelta(for: gesture.translation.width)
-                                workspace.selectClip(clip.id)
-                                workspace.nudgeSelectedClip(by: seconds)
+                                if isGroupDragging {
+                                    workspace.nudgeSelectedClips(by: seconds)
+                                } else {
+                                    workspace.selectClip(clip.id)
+                                    workspace.nudgeSelectedClip(by: seconds)
+                                }
                                 draggingClipID = nil
                                 dragTranslationX = 0
+                                isGroupDragging = false
                             }
                     )
                 }

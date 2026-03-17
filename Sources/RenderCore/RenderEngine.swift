@@ -1,6 +1,9 @@
 import Foundation
 import ProjectCore
 
+#if canImport(AVFoundation)
+import AVFoundation
+#endif
 public enum RenderJobStatus: String, Codable, Sendable {
     case queued
     case running
@@ -38,6 +41,9 @@ public enum RenderEngineError: Error, LocalizedError, Equatable {
     case queueBusy
     case unknownPreset
     case missingJob
+    case unsupportedSequence(String)
+    case missingMedia(String)
+    case exportFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -47,6 +53,12 @@ public enum RenderEngineError: Error, LocalizedError, Equatable {
             return "Unknown preset id"
         case .missingJob:
             return "Render job not found"
+        case .unsupportedSequence(let reason):
+            return "Unsupported export: \(reason)"
+        case .missingMedia(let reason):
+            return "Missing media: \(reason)"
+        case .exportFailed(let reason):
+            return "Export failed: \(reason)"
         }
     }
 }
@@ -116,6 +128,9 @@ public protocol RenderEngineProtocol: Sendable {
 public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
     private var activeJob: RenderJob?
     private let presetRegistry: ExportPresetRegistry
+    #if canImport(AVFoundation)
+    private var exportSession: AVAssetExportSession?
+    #endif
 
     public init(presetRegistry: ExportPresetRegistry = ExportPresetRegistry()) {
         self.presetRegistry = presetRegistry
@@ -151,6 +166,215 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
         guard var activeJob else { throw RenderEngineError.missingJob }
         activeJob.status = .failed
         self.activeJob = nil
+        #if canImport(AVFoundation)
+        exportSession?.cancelExport()
+        exportSession = nil
+        #endif
         return activeJob
     }
+
+    #if canImport(AVFoundation)
+    public func cancelCurrentExport() {
+        exportSession?.cancelExport()
+        exportSession = nil
+    }
+
+    public func export(
+        project: Project,
+        sequence: EditorSequence,
+        preset: ExportPreset,
+        outputURL: URL,
+        progressHandler: @escaping (Double) -> Void
+    ) async throws {
+        try validate(sequence: sequence, project: project)
+
+        let composition = try buildComposition(sequence: sequence, project: project)
+        let presetName = exportPresetName(for: preset)
+        guard let session = AVAssetExportSession(asset: composition, presetName: presetName) else {
+            throw RenderEngineError.exportFailed("Unable to create export session")
+        }
+
+        if FileManager.default.fileExists(atPath: outputURL.path()) {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+
+        session.outputURL = outputURL
+        session.outputFileType = exportFileType(for: preset)
+        session.shouldOptimizeForNetworkUse = true
+        exportSession = session
+
+        let progressTask = Task {
+            while !Task.isCancelled {
+                progressHandler(Double(session.progress))
+                if session.status != .exporting {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 120_000_000)
+            }
+        }
+
+        defer {
+            progressTask.cancel()
+            exportSession = nil
+        }
+
+        try await withCheckedThrowingContinuation { continuation in
+            session.exportAsynchronously {
+                switch session.status {
+                case .completed:
+                    progressHandler(1.0)
+                    continuation.resume()
+                case .failed:
+                    let reason = session.error?.localizedDescription ?? "Unknown export error"
+                    continuation.resume(throwing: RenderEngineError.exportFailed(reason))
+                case .cancelled:
+                    continuation.resume(throwing: RenderEngineError.exportFailed("Export cancelled"))
+                default:
+                    let reason = session.error?.localizedDescription ?? "Export did not complete"
+                    continuation.resume(throwing: RenderEngineError.exportFailed(reason))
+                }
+            }
+        }
+    }
+
+    private func validate(sequence: EditorSequence, project: Project) throws {
+        guard sequence.videoTracks.count <= 1 else {
+            throw RenderEngineError.unsupportedSequence("Multiple video tracks are not supported")
+        }
+        guard sequence.audioTracks.count <= 1 else {
+            throw RenderEngineError.unsupportedSequence("Multiple audio tracks are not supported")
+        }
+
+        if let videoTrack = sequence.videoTracks.first {
+            try validateTrack(videoTrack, in: project, kind: .video)
+        }
+        if let audioTrack = sequence.audioTracks.first {
+            try validateTrack(audioTrack, in: project, kind: .audio)
+        }
+    }
+
+    private func validateTrack(_ track: TimelineTrack, in project: Project, kind: TrackKind) throws {
+        let sorted = track.clips.sorted { $0.timelineIn < $1.timelineIn }
+        for (index, clip) in sorted.enumerated() {
+            if !clip.effects.isEmpty {
+                throw RenderEngineError.unsupportedSequence("Effects are not supported for export")
+            }
+            if clip.transforms.opacity != 1 ||
+                clip.transforms.scaleX != 1 ||
+                clip.transforms.scaleY != 1 ||
+                clip.transforms.positionX != 0 ||
+                clip.transforms.positionY != 0 {
+                throw RenderEngineError.unsupportedSequence("Clip transforms are not supported for export")
+            }
+            if clip.gain != 1 {
+                throw RenderEngineError.unsupportedSequence("Clip gain is not supported for export")
+            }
+
+            if index > 0 {
+                let previous = sorted[index - 1]
+                if clip.timelineIn < previous.timelineIn + previous.duration {
+                    throw RenderEngineError.unsupportedSequence("Overlapping clips are not supported")
+                }
+            }
+
+            guard project.assets.contains(where: { $0.id == clip.assetID }) else {
+                throw RenderEngineError.missingMedia("Asset not found for clip")
+            }
+            if kind == .video {
+                guard let asset = project.assets.first(where: { $0.id == clip.assetID }),
+                      asset.type == .video else {
+                    throw RenderEngineError.unsupportedSequence("Video track contains non-video assets")
+                }
+            }
+            if kind == .audio {
+                guard let asset = project.assets.first(where: { $0.id == clip.assetID }),
+                      asset.type == .audio || asset.type == .video else {
+                    throw RenderEngineError.unsupportedSequence("Audio track contains unsupported assets")
+                }
+            }
+        }
+    }
+
+    private func buildComposition(sequence: EditorSequence, project: Project) throws -> AVMutableComposition {
+        let composition = AVMutableComposition()
+
+        if let videoTrack = sequence.videoTracks.first {
+            let compVideo = composition.addMutableTrack(
+                withMediaType: .video,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            )
+            for clip in videoTrack.clips.sorted(by: { $0.timelineIn < $1.timelineIn }) {
+                guard let asset = project.assets.first(where: { $0.id == clip.assetID }) else {
+                    throw RenderEngineError.missingMedia("Asset missing for clip")
+                }
+                let url = URL(fileURLWithPath: asset.path)
+                guard FileManager.default.fileExists(atPath: url.path()) else {
+                    throw RenderEngineError.missingMedia("Missing file \(url.lastPathComponent)")
+                }
+                let source = AVURLAsset(url: url)
+                guard let sourceTrack = source.tracks(withMediaType: .video).first else {
+                    throw RenderEngineError.unsupportedSequence("No video track found in \(asset.name)")
+                }
+                let start = CMTime(seconds: max(0, clip.inTime), preferredTimescale: 600)
+                let duration = CMTime(seconds: max(0, clip.duration), preferredTimescale: 600)
+                let timeRange = CMTimeRange(start: start, duration: duration)
+                let insertTime = CMTime(seconds: max(0, clip.timelineIn), preferredTimescale: 600)
+                try compVideo?.insertTimeRange(timeRange, of: sourceTrack, at: insertTime)
+            }
+        }
+
+        if let audioTrack = sequence.audioTracks.first {
+            let compAudio = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            )
+            for clip in audioTrack.clips.sorted(by: { $0.timelineIn < $1.timelineIn }) {
+                guard let asset = project.assets.first(where: { $0.id == clip.assetID }) else {
+                    throw RenderEngineError.missingMedia("Asset missing for clip")
+                }
+                let url = URL(fileURLWithPath: asset.path)
+                guard FileManager.default.fileExists(atPath: url.path()) else {
+                    throw RenderEngineError.missingMedia("Missing file \(url.lastPathComponent)")
+                }
+                let source = AVURLAsset(url: url)
+                guard let sourceTrack = source.tracks(withMediaType: .audio).first else {
+                    continue
+                }
+                let start = CMTime(seconds: max(0, clip.inTime), preferredTimescale: 600)
+                let duration = CMTime(seconds: max(0, clip.duration), preferredTimescale: 600)
+                let timeRange = CMTimeRange(start: start, duration: duration)
+                let insertTime = CMTime(seconds: max(0, clip.timelineIn), preferredTimescale: 600)
+                try compAudio?.insertTimeRange(timeRange, of: sourceTrack, at: insertTime)
+            }
+        }
+
+        return composition
+    }
+
+    private func exportPresetName(for preset: ExportPreset) -> String {
+        return AVAssetExportPresetHighestQuality
+    }
+
+    private func exportFileType(for preset: ExportPreset) -> AVFileType {
+        switch preset.container.lowercased() {
+        case "mov":
+            return .mov
+        case "mp4":
+            return .mp4
+        default:
+            return .mp4
+        }
+    }
+    #else
+    public func cancelCurrentExport() {}
+    public func export(
+        project: Project,
+        sequence: EditorSequence,
+        preset: ExportPreset,
+        outputURL: URL,
+        progressHandler: @escaping (Double) -> Void
+    ) async throws {
+        throw RenderEngineError.unsupportedSequence("AVFoundation is unavailable on this platform")
+    }
+    #endif
 }

@@ -63,6 +63,47 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(workspace.selectedClipIDs.isEmpty)
     }
 
+    func testNudgeSelectedClipsMovesAll() {
+        var project = ProjectFactory.starterProject(name: "MultiNudge")
+        let assetA = MediaAsset(name: "A", path: "/tmp/nudge-a.mp4", type: .video, duration: 2)
+        let assetB = MediaAsset(name: "B", path: "/tmp/nudge-b.mp4", type: .video, duration: 2)
+        project.assets = [assetA, assetB]
+
+        let clipA = ClipRef(assetID: assetA.id, inTime: 0, outTime: 2, timelineIn: 0)
+        let clipB = ClipRef(assetID: assetB.id, inTime: 0, outTime: 2, timelineIn: 3)
+        project.sequences[0].videoTracks[0].clips = [clipA, clipB]
+        project.sequences[0].duration = 5
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.selectClips([clipA.id, clipB.id], primary: clipA.id)
+        workspace.nudgeSelectedClips(by: 1.0)
+
+        let moved = workspace.project.sequences[0].videoTracks[0].clips
+            .sorted(by: { $0.timelineIn < $1.timelineIn })
+        XCTAssertEqual(moved[0].timelineIn, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(moved[1].timelineIn, 4.0, accuracy: 0.0001)
+    }
+
+    func testRippleDeleteSelectedClipsRemovesAll() {
+        var project = ProjectFactory.starterProject(name: "MultiDelete")
+        let assetA = MediaAsset(name: "A", path: "/tmp/delete-a.mp4", type: .video, duration: 2)
+        let assetB = MediaAsset(name: "B", path: "/tmp/delete-b.mp4", type: .video, duration: 2)
+        project.assets = [assetA, assetB]
+
+        let clipA = ClipRef(assetID: assetA.id, inTime: 0, outTime: 2, timelineIn: 0)
+        let clipB = ClipRef(assetID: assetB.id, inTime: 0, outTime: 2, timelineIn: 3)
+        project.sequences[0].videoTracks[0].clips = [clipA, clipB]
+        project.sequences[0].duration = 5
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.selectClips([clipA.id, clipB.id], primary: clipA.id)
+        workspace.rippleDeleteSelectedClips()
+
+        XCTAssertTrue(workspace.project.sequences[0].videoTracks[0].clips.isEmpty)
+        XCTAssertTrue(workspace.selectedClipIDs.isEmpty)
+        XCTAssertNil(workspace.selectedClipID)
+    }
+
     func testUndoRedoAfterMarkerChange() {
         let workspace = EditorWorkspace(project: ProjectFactory.starterProject(name: "Test"))
         workspace.updatePlayhead(to: 5.0)
