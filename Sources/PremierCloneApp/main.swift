@@ -39,10 +39,12 @@ struct PremierCloneApplication: App {
 
                 if !workspace.recentProjects.isEmpty {
                     Menu("Open Recent") {
-                        ForEach(Array(workspace.recentProjects.prefix(5))) { recent in
+                        ForEach(Array(workspace.recentProjects.prefix(5).enumerated()), id: \.element.id) { index, recent in
+                            let shortcut = KeyEquivalent(Character("\(index + 1)"))
                             Button(recent.name) {
                                 workspace.openRecentProject(recent)
                             }
+                            .keyboardShortcut(shortcut, modifiers: [.command, .option])
                             Button("Reveal \(recent.name)") {
                                 workspace.revealRecentProject(recent)
                             }

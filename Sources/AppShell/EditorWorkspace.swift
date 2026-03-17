@@ -167,6 +167,7 @@ public final class EditorWorkspace: ObservableObject {
     @Published public var completedExports: [RenderJob]
     @Published public var exportHistory: [ExportHistoryItem]
     @Published public var recentProjects: [RecentProject]
+    @Published public var selectedClipIDs: Set<UUID>
     @Published public var previewVolume: Double
     @Published public var isPreviewMuted: Bool
     @Published public var playbackRate: Double
@@ -235,6 +236,7 @@ public final class EditorWorkspace: ObservableObject {
         completedExports = []
         exportHistory = []
         recentProjects = []
+        selectedClipIDs = []
         previewVolume = 1.0
         isPreviewMuted = false
         playbackRate = 1.0
@@ -372,7 +374,7 @@ public final class EditorWorkspace: ObservableObject {
         lastAutosaveURL = nil
         lastAIArtifact = nil
         selectedAssetID = nil
-        selectedClipID = nil
+        clearClipSelection()
         activeSequenceID = project.sequences.first?.id
         playheadTime = 0
         exportProgress = 0
@@ -412,7 +414,7 @@ public final class EditorWorkspace: ObservableObject {
         currentProjectBundleURL = bundleURL
         lastAutosaveURL = restoredAutosaveURL
         selectedAssetID = loaded.assets.first?.id
-        selectedClipID = nil
+        clearClipSelection()
         activeSequenceID = loaded.sequences.first?.id
         playheadTime = 0
         exportProgress = 0
@@ -709,7 +711,7 @@ public final class EditorWorkspace: ObservableObject {
             }
 
             project = workingProject
-            selectedClipID = selectedClipAfterInsert
+            selectClip(selectedClipAfterInsert)
             playheadTime = insertionTime + clipDuration
             let sourceLabel = sourceRange.usesMarkedRange ? " \(timecode(sourceRange.inTime))-\(timecode(sourceRange.outTime))" : ""
             statusMessage = "\(timelineEditMode.rawValue.capitalized) \(asset.name)\(sourceLabel) at \(timecode(insertionTime))"
@@ -732,7 +734,7 @@ public final class EditorWorkspace: ObservableObject {
             statusMessage = "No clip available to split"
             return
         }
-        selectedClipID = target.clip.id
+        selectClip(target.clip.id)
 
         guard target.clip.duration > 0.2 else {
             statusMessage = "Clip too short to split"
@@ -782,7 +784,7 @@ public final class EditorWorkspace: ObservableObject {
 
             project = workingProject
             if let selectedTrailingID {
-                selectedClipID = selectedTrailingID
+                selectClip(selectedTrailingID)
             }
             sanitizeSelectedClip()
             statusMessage = splitCount > 1 ? "Split linked clips at \(timecode(splitTime))" : "Split clip at \(timecode(splitTime))"
@@ -805,7 +807,7 @@ public final class EditorWorkspace: ObservableObject {
             statusMessage = "No clip available to ripple delete"
             return
         }
-        selectedClipID = target.clip.id
+        selectClip(target.clip.id)
 
         let deleteTargets = linkedEditTargets(for: target, in: sequence)
         guard !hasLockedTrack(in: deleteTargets) else {
@@ -1377,7 +1379,33 @@ public final class EditorWorkspace: ObservableObject {
     }
 
     public func selectClip(_ clipID: UUID?) {
-        selectedClipID = clipID
+        if let clipID {
+            selectedClipID = clipID
+            selectedClipIDs = [clipID]
+        } else {
+            selectedClipID = nil
+            selectedClipIDs = []
+        }
+    }
+
+    public func selectClips(_ clipIDs: [UUID], primary: UUID? = nil) {
+        let unique = Array(Set(clipIDs))
+        guard !unique.isEmpty else {
+            selectedClipID = nil
+            selectedClipIDs = []
+            return
+        }
+        selectedClipIDs = Set(unique)
+        if let primary, selectedClipIDs.contains(primary) {
+            selectedClipID = primary
+        } else {
+            selectedClipID = unique.first
+        }
+    }
+
+    public func clearClipSelection() {
+        selectedClipID = nil
+        selectedClipIDs = []
     }
 
     public func selectAsset(_ assetID: UUID?) {
@@ -1519,8 +1547,10 @@ public final class EditorWorkspace: ObservableObject {
             if targetedVideoTrackID == removedTrack.id {
                 targetedVideoTrackID = updatedProject.sequences[sequenceIndex].videoTracks.first?.id
             }
-            if removedTrack.clips.contains(where: { $0.id == selectedClipID }) {
-                selectedClipID = nil
+            let removedIDs = Set(removedTrack.clips.map(\.id))
+            if !selectedClipIDs.isDisjoint(with: removedIDs) {
+                selectedClipIDs.subtract(removedIDs)
+                syncPrimarySelection()
             }
             lockedTrackIDs.remove(removedTrack.id)
             statusMessage = "Removed video track \(removedTrack.name)"
@@ -1537,8 +1567,10 @@ public final class EditorWorkspace: ObservableObject {
             if targetedAudioTrackID == removedTrack.id {
                 targetedAudioTrackID = updatedProject.sequences[sequenceIndex].audioTracks.first?.id
             }
-            if removedTrack.clips.contains(where: { $0.id == selectedClipID }) {
-                selectedClipID = nil
+            let removedIDs = Set(removedTrack.clips.map(\.id))
+            if !selectedClipIDs.isDisjoint(with: removedIDs) {
+                selectedClipIDs.subtract(removedIDs)
+                syncPrimarySelection()
             }
             lockedTrackIDs.remove(removedTrack.id)
             statusMessage = "Removed audio track \(removedTrack.name)"
@@ -1593,7 +1625,7 @@ public final class EditorWorkspace: ObservableObject {
         guard project.sequences.contains(where: { $0.id == sequenceID }) else { return }
         stopPlaybackLoop()
         activeSequenceID = sequenceID
-        selectedClipID = nil
+        clearClipSelection()
         selectedCaptionSegmentID = nil
         inPoint = nil
         outPoint = nil
@@ -1665,7 +1697,7 @@ public final class EditorWorkspace: ObservableObject {
         updatedProject.sequences.append(newSequence)
         project = updatedProject
         activeSequenceID = newSequence.id
-        selectedClipID = nil
+        clearClipSelection()
         selectedCaptionSegmentID = nil
         inPoint = nil
         outPoint = nil
@@ -1708,7 +1740,7 @@ public final class EditorWorkspace: ObservableObject {
         updatedProject.sequences.append(duplicated)
         project = updatedProject
         activeSequenceID = duplicated.id
-        selectedClipID = nil
+        clearClipSelection()
         selectedCaptionSegmentID = nil
         inPoint = nil
         outPoint = nil
@@ -3069,6 +3101,15 @@ public final class EditorWorkspace: ObservableObject {
             }
         }
 
+        let validIDs = Set(
+            (activeSequence?.videoTracks.flatMap(\.clips).map(\.id) ?? []) +
+            (activeSequence?.audioTracks.flatMap(\.clips).map(\.id) ?? [])
+        )
+        if !selectedClipIDs.isEmpty {
+            selectedClipIDs = selectedClipIDs.intersection(validIDs)
+        }
+        syncPrimarySelection()
+
         if let selectedAssetID,
            !project.assets.contains(where: { $0.id == selectedAssetID }) {
             self.selectedAssetID = project.assets.first?.id
@@ -3109,6 +3150,13 @@ public final class EditorWorkspace: ObservableObject {
         let validTrackIDs = Set(sequence.videoTracks.map(\.id) + sequence.audioTracks.map(\.id))
         lockedTrackIDs = Set(lockedTrackIDs.filter { validTrackIDs.contains($0) })
     }
+
+    private func syncPrimarySelection() {
+        if let selectedClipID, selectedClipIDs.contains(selectedClipID) {
+            return
+        }
+        selectedClipID = selectedClipIDs.first
+    }
 }
 
 public struct EditorRootView: View {
@@ -3127,6 +3175,7 @@ public struct EditorRootView: View {
     @State private var viewerLayout: WorkspaceLayoutSettings.ViewerLayout = .auto
     @State private var trackLaneHeight: CGFloat = 54
     @State private var selectedExportPresetID = "youtube-1080p-h264"
+    @State private var showsExportQueue = false
     @State private var timelineZoom: Double = 1.0
     @State private var sourceViewerZoom: Double = 1.0
     @State private var programViewerZoom: Double = 1.0
@@ -3135,6 +3184,12 @@ public struct EditorRootView: View {
     @State private var editingBrowserBinName = ""
     @State private var draggingClipID: UUID?
     @State private var dragTranslationX: CGFloat = 0
+    @State private var marqueeTrackID: UUID?
+    @State private var marqueeTrackKind: TrackKind?
+    @State private var marqueeStartX: CGFloat?
+    @State private var marqueeCurrentX: CGFloat?
+    @State private var isMarqueeSelecting = false
+    @State private var lastMarqueeSelectionAt: Date?
     @State private var leftResizeStartWidth: CGFloat?
     @State private var rightResizeStartWidth: CGFloat?
     @State private var centerResizeStartHeight: CGFloat?
@@ -3425,6 +3480,9 @@ public struct EditorRootView: View {
             }
         }
         .frame(minWidth: 960, minHeight: 620)
+        .sheet(isPresented: $showsExportQueue) {
+            exportQueueSheet
+        }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.newProject)) { _ in
             workspace.createNewProject()
             enterEditor()
@@ -5238,6 +5296,8 @@ public struct EditorRootView: View {
                         workspace.generateProxyManifest()
                     }
                     Menu {
+                        Button("Open Export Queue Panel") { showsExportQueue = true }
+                        Divider()
                         if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
                             Label("Rendering… \(Int(workspace.exportProgress * 100))%", systemImage: "clock")
                             Button("Cancel Current Export") { workspace.cancelExport() }
@@ -5358,6 +5418,7 @@ public struct EditorRootView: View {
                 viewerSurface(descriptor: descriptor)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .scaleEffect(viewerZoom(for: kind))
+                    .animation(.easeOut(duration: 0.12), value: viewerZoom(for: kind))
                     .clipped()
 
                 if kind == .program, let liveCaption = activeCaptionAtPlayhead {
@@ -5805,7 +5866,28 @@ public struct EditorRootView: View {
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onEnded { gesture in
+                                if let lastMarqueeSelectionAt,
+                                   Date().timeIntervalSince(lastMarqueeSelectionAt) < 0.2 {
+                                    return
+                                }
+                                workspace.clearClipSelection()
                                 workspace.updatePlayhead(to: time(atX: gesture.location.x))
+                            }
+                    )
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 6)
+                            .onChanged { gesture in
+                                isMarqueeSelecting = true
+                                updateMarqueeSelection(
+                                    for: sortedClips,
+                                    trackID: track.id,
+                                    kind: kind,
+                                    startX: gesture.startLocation.x,
+                                    currentX: gesture.location.x
+                                )
+                            }
+                            .onEnded { _ in
+                                endMarqueeSelection()
                             }
                     )
 
@@ -5814,6 +5896,18 @@ public struct EditorRootView: View {
                         .fill(Color.yellow.opacity(0.50))
                         .frame(width: 1, height: normalizedTrackLaneHeight)
                         .offset(x: xPosition(for: marker.time))
+                }
+
+                if marqueeTrackID == track.id,
+                   let rect = marqueeRect(trackHeight: normalizedTrackLaneHeight) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.white.opacity(0.6), lineWidth: 1)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.white.opacity(0.08))
+                        )
+                        .frame(width: rect.width, height: rect.height)
+                        .offset(x: rect.minX, y: rect.minY)
                 }
 
                 ForEach(sortedClips) { clip in
@@ -5835,7 +5929,7 @@ public struct EditorRootView: View {
                     .overlay(
                         RoundedRectangle(cornerRadius: 6)
                             .stroke(
-                                workspace.selectedClipID == clip.id ? Color.white : Color.clear,
+                                workspace.selectedClipIDs.contains(clip.id) ? Color.white : Color.clear,
                                 lineWidth: 1.6
                             )
                     )
@@ -6049,6 +6143,49 @@ public struct EditorRootView: View {
     private func time(atX xPosition: CGFloat) -> TimeInterval {
         guard timelinePixelsPerSecond > 0 else { return 0 }
         return TimeInterval(max(0, xPosition / timelinePixelsPerSecond))
+    }
+
+    private func marqueeRect(trackHeight: CGFloat) -> CGRect? {
+        guard let startX = marqueeStartX, let currentX = marqueeCurrentX else {
+            return nil
+        }
+        let clampedStart = min(max(0, startX), timelineCanvasWidth)
+        let clampedCurrent = min(max(0, currentX), timelineCanvasWidth)
+        let minX = min(clampedStart, clampedCurrent)
+        let maxX = max(clampedStart, clampedCurrent)
+        return CGRect(x: minX, y: 0, width: max(1, maxX - minX), height: trackHeight)
+    }
+
+    private func updateMarqueeSelection(
+        for clips: [ClipRef],
+        trackID: UUID,
+        kind: TrackKind,
+        startX: CGFloat,
+        currentX: CGFloat
+    ) {
+        marqueeTrackID = trackID
+        marqueeTrackKind = kind
+        marqueeStartX = startX
+        marqueeCurrentX = currentX
+
+        let minX = min(startX, currentX)
+        let maxX = max(startX, currentX)
+        let startTime = time(atX: minX)
+        let endTime = time(atX: maxX)
+
+        let selected = clips
+            .filter { $0.timelineIn < endTime && $0.outTime > startTime }
+            .map(\.id)
+        workspace.selectClips(selected, primary: selected.first)
+    }
+
+    private func endMarqueeSelection() {
+        marqueeStartX = nil
+        marqueeCurrentX = nil
+        marqueeTrackID = nil
+        marqueeTrackKind = nil
+        isMarqueeSelecting = false
+        lastMarqueeSelectionAt = Date()
     }
 
     private func snappedTimelineDelta(for translationX: CGFloat) -> TimeInterval {
@@ -6406,6 +6543,82 @@ public struct EditorRootView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    private var exportQueueSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Export Queue")
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                Button("Close") { showsExportQueue = false }
+                    .buttonStyle(.bordered)
+            }
+
+            if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
+                HStack(spacing: 10) {
+                    ProgressView(value: workspace.exportProgress)
+                    Text("\(Int(workspace.exportProgress * 100))%")
+                        .font(.caption.monospacedDigit())
+                    Spacer()
+                    Button("Cancel Export") { workspace.cancelExport() }
+                        .buttonStyle(.bordered)
+                }
+                .padding(10)
+                .background(Color.white.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                Text("No active export")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if workspace.exportHistory.isEmpty {
+                        Text("Completed exports will appear here with retry and open actions.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        ForEach(workspace.exportHistory) { item in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(alignment: .top) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(item.sequenceName)
+                                            .font(.caption.weight(.semibold))
+                                        Text("\(item.presetName) • \(item.resolution) • \(item.container.uppercased())")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                        Text(item.completedAt.formatted(date: .abbreviated, time: .shortened))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                }
+
+                                HStack(spacing: 6) {
+                                    Button("Retry") { retryExportHistory(item) }
+                                        .buttonStyle(.bordered)
+                                    Button("Open") { workspace.openExportOutput(item) }
+                                        .buttonStyle(.bordered)
+                                    Button("Reveal") { workspace.revealExportOutput(item) }
+                                        .buttonStyle(.bordered)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .background(Color.white.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 560, minHeight: 380)
+    }
+
     private func retryExportHistory(_ item: EditorWorkspace.ExportHistoryItem) {
         if workspace.activeSequenceID != item.sequenceID {
             workspace.setActiveSequence(item.sequenceID)
@@ -6431,6 +6644,9 @@ public struct EditorRootView: View {
     private func clipFillColor(for clip: ClipRef, baseTint: Color) -> Color {
         if workspace.selectedClipID == clip.id {
             return baseTint.opacity(1.0)
+        }
+        if workspace.selectedClipIDs.contains(clip.id) {
+            return baseTint.opacity(0.88)
         }
         return baseTint.opacity(0.78)
     }
@@ -6649,6 +6865,7 @@ private struct MediaViewerSurface: View {
     @State private var loadedAssetID: UUID?
     @State private var previewImage: NSImage?
     @State private var previewMessage: String?
+    @State private var lastPreviewTime: TimeInterval?
     private let stagingRootURL = FileManager.default.temporaryDirectory
         .appendingPathComponent("PremierCloneImports", isDirectory: true)
 
@@ -6696,7 +6913,9 @@ private struct MediaViewerSurface: View {
         }
         .onChange(of: seekTime) { _ in
             syncSeek(force: false)
-            refreshPreviewImage()
+            if !shouldPlay {
+                refreshPreviewImage()
+            }
         }
         .onChange(of: shouldPlay) { _ in
             syncPlayback()
@@ -6779,6 +6998,7 @@ private struct MediaViewerSurface: View {
         let item = AVPlayerItem(url: mediaURL)
         let newPlayer = AVPlayer(playerItem: item)
         newPlayer.actionAtItemEnd = .pause
+        newPlayer.automaticallyWaitsToMinimizeStalling = false
 
         player?.pause()
         player = newPlayer
@@ -6814,10 +7034,20 @@ private struct MediaViewerSurface: View {
     }
 
     private func refreshPreviewImage() {
+        if shouldPlay {
+            return
+        }
+
         guard let asset, asset.type == .video else {
             previewImage = nil
             return
         }
+
+        let targetTime = max(0, seekTime ?? 0)
+        if let lastPreviewTime, abs(lastPreviewTime - targetTime) < 0.03 {
+            return
+        }
+        lastPreviewTime = targetTime
 
         guard let url = resolvedPreviewURL(for: asset) else {
             previewImage = nil
@@ -6829,7 +7059,7 @@ private struct MediaViewerSurface: View {
         let generator = AVAssetImageGenerator(asset: assetResource)
         generator.appliesPreferredTrackTransform = true
 
-        let desiredTime = CMTime(seconds: max(0, seekTime ?? 0), preferredTimescale: 600)
+        let desiredTime = CMTime(seconds: targetTime, preferredTimescale: 600)
 
         if let generated = try? generator.copyCGImage(at: desiredTime, actualTime: nil) {
             previewImage = NSImage(cgImage: generated, size: .zero)

@@ -46,6 +46,23 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(updated?.transforms.positionX, 42)
     }
 
+    func testSelectClipsUpdatesPrimarySelection() {
+        let workspace = EditorWorkspace(project: ProjectFactory.starterProject(name: "Selection"))
+        let clipA = UUID()
+        let clipB = UUID()
+
+        workspace.selectClips([clipA, clipB], primary: clipB)
+
+        XCTAssertEqual(workspace.selectedClipID, clipB)
+        XCTAssertTrue(workspace.selectedClipIDs.contains(clipA))
+        XCTAssertTrue(workspace.selectedClipIDs.contains(clipB))
+
+        workspace.clearClipSelection()
+
+        XCTAssertNil(workspace.selectedClipID)
+        XCTAssertTrue(workspace.selectedClipIDs.isEmpty)
+    }
+
     func testUndoRedoAfterMarkerChange() {
         let workspace = EditorWorkspace(project: ProjectFactory.starterProject(name: "Test"))
         workspace.updatePlayhead(to: 5.0)
