@@ -18,10 +18,12 @@ struct PremierCloneApplication: App {
     @NSApplicationDelegateAdaptor(PremierCloneAppDelegate.self)
     private var appDelegate
     #endif
+    @StateObject private var workspace = EditorWorkspace()
 
     var body: some Scene {
         WindowGroup("Premier Clone") {
             EditorRootView()
+                .environmentObject(workspace)
         }
         .commands {
             CommandMenu("File") {
@@ -34,6 +36,26 @@ struct PremierCloneApplication: App {
                     EditorCommand.post(EditorCommand.openProject)
                 }
                 .keyboardShortcut("o", modifiers: .command)
+
+                if !workspace.recentProjects.isEmpty {
+                    Menu("Open Recent") {
+                        ForEach(Array(workspace.recentProjects.prefix(5))) { recent in
+                            Button(recent.name) {
+                                workspace.openRecentProject(recent)
+                            }
+                            Button("Reveal \(recent.name)") {
+                                workspace.revealRecentProject(recent)
+                            }
+                            Button("Remove \(recent.name)") {
+                                workspace.removeRecentProject(recent)
+                            }
+                        }
+                        Divider()
+                        Button("Clear Recent Projects") {
+                            workspace.clearRecentProjects()
+                        }
+                    }
+                }
 
                 Button("Save Project") {
                     EditorCommand.post(EditorCommand.saveProject)

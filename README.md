@@ -45,6 +45,7 @@ A macOS-first open-source non-linear editor prototype inspired by Premiere Pro a
   - reset workspace action (`Cmd+Opt+0`) to recover a known-good beginner layout
   - working quick actions for new/open/editor flow from home
   - recent projects list on the home screen with open/reveal/remove actions
+  - File menu recent-project entries and toolbar export-queue controls for quick access
   - beginner-facing home "Project Health" panel with autosave restore, relink, proxy, and recent-export actions
   - multi-sequence create/duplicate/switch
   - timeline marker add + jump-to-next-marker

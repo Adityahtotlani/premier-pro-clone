@@ -3112,7 +3112,7 @@ public final class EditorWorkspace: ObservableObject {
 }
 
 public struct EditorRootView: View {
-    @StateObject private var workspace = EditorWorkspace()
+    @EnvironmentObject private var workspace: EditorWorkspace
     @State private var workspaceStage: WorkspaceStage = .home
     @State private var browserTab: BrowserTab = .libraries
     @State private var inspectorTab: InspectorTab = .video
@@ -3627,6 +3627,7 @@ public struct EditorRootView: View {
             ensureSelectedBrowserBin()
         }
         .onChange(of: workspace.project.id) { _ in
+            workspaceStage = .editor
             restoreWorkspaceLayoutFromProject()
             ensureSelectedBrowserBin()
         }
@@ -5236,6 +5237,27 @@ public struct EditorRootView: View {
                     toolbarButton("Proxies", systemImage: "externaldrive.badge.icloud") {
                         workspace.generateProxyManifest()
                     }
+                    Menu {
+                        if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
+                            Label("Rendering… \(Int(workspace.exportProgress * 100))%", systemImage: "clock")
+                            Button("Cancel Current Export") { workspace.cancelExport() }
+                        } else {
+                            Label("No active export", systemImage: "checkmark.circle")
+                        }
+                        Divider()
+                        if let latest = workspace.exportHistory.first {
+                            Button("Open Last Export") { workspace.openExportOutput(latest) }
+                            Button("Reveal Last Export") { workspace.revealExportOutput(latest) }
+                            Button("Retry Last Export") { workspace.retryExport(using: latest) }
+                        } else {
+                            Label("No previous exports", systemImage: "clock.arrow.circlepath")
+                        }
+                    } label: {
+                        Label("Export Queue", systemImage: "clock.arrow.circlepath")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(Color(red: 0.40, green: 0.40, blue: 0.43))
                     if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
                         toolbarButton("Cancel Export", systemImage: "xmark.circle") { workspace.cancelExport() }
                     }
@@ -6301,7 +6323,7 @@ public struct EditorRootView: View {
     private var exportHistoryPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Export History")
+                Text("Export Queue")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -6309,6 +6331,29 @@ public struct EditorRootView: View {
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
+
+            if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
+                HStack(spacing: 8) {
+                    ProgressView(value: workspace.exportProgress)
+                    Text("\(Int(workspace.exportProgress * 100))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.85))
+                    Spacer()
+                    Button("Cancel") {
+                        workspace.cancelExport()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(8)
+                .background(Color.white.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                Text("No active export")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
 
             if workspace.exportHistory.isEmpty {
                 Text("Completed exports will appear here with retry and open actions.")
