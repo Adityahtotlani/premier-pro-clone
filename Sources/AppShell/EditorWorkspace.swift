@@ -317,6 +317,42 @@ public final class EditorWorkspace: ObservableObject {
         ExportPresetRegistry.defaultPresets
     }
 
+    public var exportSupportStatus: ExportSupportStatus {
+        if (activeSequence?.videoTracks.flatMap(\.clips).isEmpty ?? true)
+            && (activeSequence?.audioTracks.flatMap(\.clips).isEmpty ?? true) {
+            return .emptySequence
+        }
+
+        if !missingAssets.isEmpty {
+            return .missingMedia(missingAssets.count)
+        }
+
+        // Prototype limitation: exports are simulated only
+        return .simulatedOnly
+    }
+
+    public var canExport: Bool {
+        switch exportSupportStatus {
+        case .ready, .simulatedOnly:
+            return true
+        case .missingMedia, .emptySequence:
+            return false
+        }
+    }
+
+    public var exportSupportMessage: String {
+        switch exportSupportStatus {
+        case .ready:
+            return "Export supported for this sequence."
+        case .simulatedOnly:
+            return "Exports are simulated in this prototype; encoded output may not match timeline playback."
+        case .missingMedia(let count):
+            return "\(count) asset(s) need relink before export."
+        case .emptySequence:
+            return "Add clips to the sequence before exporting."
+        }
+    }
+
     public func exportPreset(id: String) -> ExportPreset? {
         exportPresets.first(where: { $0.id == id })
     }
@@ -3095,7 +3131,10 @@ public final class EditorWorkspace: ObservableObject {
                         self.exportProgressTask = nil
                         if let completed = try? self.renderEngine.completeCurrentJob() {
                             self.completedExports.insert(completed, at: 0)
-                            if let historyItem = self.buildExportHistoryItem(for: completed) {
+                            if let preset = self.exportPreset(id: completed.presetID),
+                               let sequence = self.project.sequences.first(where: { $0.id == completed.sequenceID }),
+                               let artifact = try? self.writeExportArtifact(for: completed, preset: preset, sequence: sequence),
+                               let historyItem = self.buildExportHistoryItem(for: completed, artifact: artifact) {
                                 self.exportHistory.insert(historyItem, at: 0)
                             }
                         }
@@ -4225,6 +4264,7 @@ public struct EditorRootView: View {
                 VStack(spacing: 12) {
                     quickStartHomePanel
                     projectHealthHomePanel
+                    exportSupportBanner
                 }
             } else {
                 HStack(alignment: .top, spacing: 12) {
@@ -4232,6 +4272,7 @@ public struct EditorRootView: View {
                     projectHealthHomePanel
                 }
                 .frame(maxWidth: 860)
+                exportSupportBanner
             }
 
             if !workspace.recentProjects.isEmpty {
@@ -4302,7 +4343,11 @@ public struct EditorRootView: View {
                 }
                 quickStartActionButton("Export", systemImage: "square.and.arrow.up") {
                     enterEditor()
-                    workspace.enqueueExport(presetID: selectedExportPreset?.id ?? "youtube-1080p-h264")
+                    if workspace.canExport {
+                        workspace.enqueueExport(presetID: selectedExportPreset?.id ?? "youtube-1080p-h264")
+                    } else {
+                        workspace.statusMessage = workspace.exportSupportMessage
+                    }
                 }
             }
         }
@@ -4362,6 +4407,7 @@ public struct EditorRootView: View {
                     workspace.generateProxyManifest()
                 }
                 .disabled(workspace.currentProjectBundleURL == nil || workspace.project.assets.isEmpty)
+                .help("Writes a proxy manifest only; no proxy media is generated in this prototype.")
             }
 
             HStack(spacing: 8) {
@@ -4504,6 +4550,19 @@ public struct EditorRootView: View {
     private func recentProjectDetail(_ recent: EditorWorkspace.RecentProject) -> String {
         let filename = URL(fileURLWithPath: recent.path).lastPathComponent
         return "\(filename) • \(recent.lastOpened.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    private var exportSupportBanner: some View {
+        HStack {
+            Image(systemName: "info.circle")
+            Text(workspace.exportSupportMessage)
+                .font(.caption)
+        }
+        .foregroundStyle(.secondary)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     private func enterEditor() {
@@ -5463,11 +5522,17 @@ public struct EditorRootView: View {
                         "Export \(selectedExportPreset?.container.uppercased() ?? "MP4")",
                         systemImage: "square.and.arrow.up"
                     ) {
-                        workspace.enqueueExport(presetID: selectedExportPreset?.id ?? "youtube-1080p-h264")
+                        if workspace.canExport {
+                            workspace.enqueueExport(presetID: selectedExportPreset?.id ?? "youtube-1080p-h264")
+                        } else {
+                            workspace.statusMessage = workspace.exportSupportMessage
+                        }
                     }
-                    toolbarButton("Proxies", systemImage: "externaldrive.badge.icloud") {
+                    .disabled(!workspace.canExport)
+                    toolbarButton("Proxy Manifest", systemImage: "externaldrive.badge.icloud") {
                         workspace.generateProxyManifest()
                     }
+                    .help("Writes proxy manifest only; actual proxy media not generated in this prototype.")
                     Menu {
                         Button("Open Export Queue Panel") { showsExportQueue = true }
                         Divider()
@@ -5478,6 +5543,9 @@ public struct EditorRootView: View {
                             Label("No active export", systemImage: "checkmark.circle")
                         }
                         Divider()
+                        Label(workspace.exportSupportMessage, systemImage: "info.circle")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                         if let latest = workspace.exportHistory.first {
                             Button("Open Last Export") { workspace.openExportOutput(latest) }
                             Button("Reveal Last Export") { workspace.revealExportOutput(latest) }
@@ -7311,3 +7379,9 @@ private struct MediaViewerSurface: View {
     }
 }
 #endif
+    public enum ExportSupportStatus: Equatable {
+        case ready
+        case simulatedOnly
+        case missingMedia(Int)
+        case emptySequence
+    }

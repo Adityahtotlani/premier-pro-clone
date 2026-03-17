@@ -179,12 +179,13 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
         exportSession = nil
     }
 
+    @MainActor
     public func export(
         project: Project,
         sequence: EditorSequence,
         preset: ExportPreset,
         outputURL: URL,
-        progressHandler: @escaping (Double) -> Void
+        progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws {
         try validate(sequence: sequence, project: project)
 
@@ -203,7 +204,7 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
         session.shouldOptimizeForNetworkUse = true
         exportSession = session
 
-        let progressTask = Task {
+        let progressTask = Task { @MainActor in
             while !Task.isCancelled {
                 progressHandler(Double(session.progress))
                 if session.status != .exporting {
