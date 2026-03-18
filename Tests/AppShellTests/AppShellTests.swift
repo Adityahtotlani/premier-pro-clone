@@ -176,6 +176,36 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(audioClips.count, 2)
     }
 
+    func testSlipSelectedVideoSlipsLinkedAudio() {
+        var project = ProjectFactory.starterProject(name: "LinkedSlip")
+        project.assets = [MediaAsset(name: "Clip", path: "/tmp/linked-slip.mp4", type: .video, duration: 8)]
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.appendFirstAssetToTimeline()
+
+        guard let selectedVideo = workspace.selectedClip else {
+            XCTFail("Expected selected video clip")
+            return
+        }
+
+        let audioBefore = workspace.activeSequence?.audioTracks
+            .flatMap(\.clips)
+            .first(where: { $0.linkedAudioIDs.contains(selectedVideo.id) || selectedVideo.linkedAudioIDs.contains($0.id) })
+        XCTAssertNotNil(audioBefore)
+
+        workspace.slipSelectedClip(by: 1.0)
+
+        let slippedVideo = workspace.activeSequence?.videoTracks
+            .flatMap(\.clips)
+            .first(where: { $0.id == selectedVideo.id })
+        let slippedAudio = workspace.activeSequence?.audioTracks
+            .flatMap(\.clips)
+            .first(where: { $0.id == audioBefore?.id })
+
+        XCTAssertEqual(slippedVideo?.inTime, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(slippedAudio?.inTime, 1.0, accuracy: 0.0001)
+    }
+
     func testMagneticInsertShiftsExistingTimeline() {
         var project = ProjectFactory.starterProject(name: "MagneticInsert")
         project.assets = [MediaAsset(name: "Clip", path: "/tmp/mag.mp4", type: .video, duration: 4)]
@@ -701,6 +731,46 @@ final class AppShellTests: XCTestCase {
         XCTAssertNotNil(workspace.exportPreset(id: "youtube-1080p-h264"))
         XCTAssertNotNil(workspace.exportPreset(id: "tiktok-1080x1920-h265"))
         XCTAssertNotNil(workspace.exportPreset(id: "reels-1080x1920-h264"))
+    }
+
+    func testExportSupportIgnoresUnusedMissingMedia() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ExportSupportUnusedMissing-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
+        let existingURL = tempDirectory.appendingPathComponent("used.mov")
+        try Data([0x01, 0x02, 0x03]).write(to: existingURL)
+
+        var project = ProjectFactory.starterProject(name: "ExportSupport")
+        let used = MediaAsset(name: "Used", path: existingURL.path, type: .video, duration: 4)
+        let unusedMissing = MediaAsset(name: "Unused", path: "/tmp/missing-unused-\(UUID().uuidString).mov", type: .video, duration: 4)
+        project.assets = [used, unusedMissing]
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.selectAsset(used.id)
+        workspace.appendSelectedAssetToTimeline()
+
+        if case .missingMedia = workspace.exportSupportStatus {
+            XCTFail("Unused missing media should not block export")
+        }
+    }
+
+    func testExportSupportFlagsMissingSequenceAssetReference() {
+        var project = ProjectFactory.starterProject(name: "MissingSequenceAsset")
+        let clip = ClipRef(assetID: UUID(), inTime: 0, outTime: 4, timelineIn: 0)
+        project.sequences[0].videoTracks[0].clips = [clip]
+        project.assets = []
+
+        let workspace = EditorWorkspace(project: project)
+
+        if case .missingMedia(let reason) = workspace.exportSupportStatus {
+            XCTAssertTrue(reason.contains("Asset not found") || reason.contains("missing"), "Unexpected reason: \(reason)")
+        } else {
+            XCTFail("Expected missing media export status")
+        }
     }
 
     func testEnqueueExportUsesRequestedPresetID() {

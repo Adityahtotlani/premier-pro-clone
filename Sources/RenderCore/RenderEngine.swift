@@ -173,6 +173,21 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
         return activeJob
     }
 
+    public func preflight(project: Project, sequence: EditorSequence) -> RenderEngineError? {
+        #if canImport(AVFoundation)
+        do {
+            try validate(sequence: sequence, project: project)
+            return nil
+        } catch let error as RenderEngineError {
+            return error
+        } catch {
+            return .exportFailed(error.localizedDescription)
+        }
+        #else
+        return .unsupportedSequence("AVFoundation export is unavailable on this platform")
+        #endif
+    }
+
     #if canImport(AVFoundation)
     public func cancelCurrentExport() {
         exportSession?.cancelExport()

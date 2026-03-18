@@ -319,41 +319,33 @@ public final class EditorWorkspace: ObservableObject {
     }
 
     public var exportSupportStatus: ExportSupportStatus {
-        if (activeSequence?.videoTracks.flatMap(\.clips).isEmpty ?? true)
-            && (activeSequence?.audioTracks.flatMap(\.clips).isEmpty ?? true) {
-            return .emptySequence
-        }
-
-        if !missingAssets.isEmpty {
-            return .missingMedia(missingAssets.count)
-        }
-
-        #if !canImport(AVFoundation)
-        return .unsupported("AVFoundation export is unavailable on this platform.")
-        #else
         guard let sequence = activeSequence else {
             return .unsupported("No active sequence selected.")
         }
 
-        // Mirror RenderCore preflight constraints so we can tell the user what to fix before exporting.
-        if sequence.videoTracks.count > 1 {
-            return .unsupported("Multiple video tracks are not supported yet. Merge down to a single video track.")
-        }
-        if sequence.audioTracks.count > 1 {
-            return .unsupported("Multiple audio tracks are not supported yet. Merge down to a single audio track.")
+        if sequence.videoTracks.flatMap(\.clips).isEmpty
+            && sequence.audioTracks.flatMap(\.clips).isEmpty {
+            return .emptySequence
         }
 
-        if let track = sequence.videoTracks.first,
-           let issue = exportPreflightIssue(in: track) {
-            return .unsupported(issue)
-        }
-        if let track = sequence.audioTracks.first,
-           let issue = exportPreflightIssue(in: track) {
-            return .unsupported(issue)
+        if let preflightError = renderEngine.preflight(project: project, sequence: sequence) {
+            switch preflightError {
+            case .missingMedia(let reason):
+                return .missingMedia(reason)
+            case .unsupportedSequence(let reason):
+                return .unsupported(reason)
+            case .queueBusy:
+                return .unsupported("Another export is already running.")
+            case .unknownPreset:
+                return .unsupported("Unknown export preset.")
+            case .missingJob:
+                return .unsupported("Render job is unavailable.")
+            case .exportFailed(let reason):
+                return .unsupported(reason)
+            }
         }
 
         return .ready
-        #endif
     }
 
     public var canExport: Bool {
@@ -365,45 +357,28 @@ public final class EditorWorkspace: ObservableObject {
         }
     }
 
+    public var canSlipSelectedClip: Bool {
+        guard let sequence = activeSequence, let selection = clipSelection else {
+            return false
+        }
+        let targets = linkedEditTargets(
+            for: (clip: selection.clip, trackID: selection.trackID, kind: selection.kind),
+            in: sequence
+        )
+        return !targets.isEmpty && !hasLockedTrack(in: targets)
+    }
+
     public var exportSupportMessage: String {
         switch exportSupportStatus {
         case .ready:
             return "Export ready (prototype: 1 video + 1 audio track; no effects/transforms/gain yet)."
-        case .missingMedia(let count):
-            return "\(count) missing file(s). Relink media before exporting."
+        case .missingMedia(let reason):
+            return "Relink media before exporting: \(reason)"
         case .unsupported(let reason):
             return "Export not supported: \(reason)"
         case .emptySequence:
             return "Add clips to the sequence before exporting."
         }
-    }
-
-    private func exportPreflightIssue(in track: TimelineTrack) -> String? {
-        let sorted = track.clips.sorted { $0.timelineIn < $1.timelineIn }
-        for (index, clip) in sorted.enumerated() {
-            if !clip.effects.isEmpty {
-                return "Effects are not supported for export yet. Remove effects from clips."
-            }
-            if clip.transforms.opacity != 1 ||
-                clip.transforms.scaleX != 1 ||
-                clip.transforms.scaleY != 1 ||
-                clip.transforms.positionX != 0 ||
-                clip.transforms.positionY != 0 {
-                return "Clip transforms are not supported for export yet. Reset transform values to defaults."
-            }
-            if clip.gain != 1 {
-                return "Clip gain is not supported for export yet. Reset gain to 1.0."
-            }
-
-            if index > 0 {
-                let previous = sorted[index - 1]
-                if clip.timelineIn < previous.timelineIn + previous.duration {
-                    return "Overlapping clips are not supported for export yet. Remove overlaps."
-                }
-            }
-        }
-
-        return nil
     }
 
     public func exportPreset(id: String) -> ExportPreset? {
@@ -1946,25 +1921,36 @@ public final class EditorWorkspace: ObservableObject {
             statusMessage = "Select a clip first"
             return
         }
-        guard !isTrackLocked(selection.trackID) else {
+        let slipTargets = linkedEditTargets(
+            for: (clip: selection.clip, trackID: selection.trackID, kind: selection.kind),
+            in: sequence
+        )
+        guard !hasLockedTrack(in: slipTargets) else {
             statusMessage = "Track is locked"
             return
         }
         recordUndoSnapshot()
+        var workingProject = project
 
         do {
-            let result = try timelineEngine.apply(
-                operation: .slipClip(
-                    sequenceID: sequence.id,
-                    trackID: selection.trackID,
-                    trackKind: selection.kind,
-                    clipID: selection.clip.id,
-                    deltaSource: seconds
-                ),
-                to: project
-            )
-            project = result.0
-            statusMessage = "Slipped clip content"
+            for target in slipTargets {
+                let result = try timelineEngine.apply(
+                    operation: .slipClip(
+                        sequenceID: sequence.id,
+                        trackID: target.trackID,
+                        trackKind: target.kind,
+                        clipID: target.clipID,
+                        deltaSource: seconds
+                    ),
+                    to: workingProject
+                )
+                workingProject = result.0
+            }
+            project = workingProject
+            let deltaText = String(format: "%+.1fs", seconds)
+            statusMessage = slipTargets.count > 1 ?
+                "Slipped linked clips by \(deltaText)" :
+                "Slipped clip by \(deltaText)"
         } catch {
             statusMessage = "Slip failed: \(error.localizedDescription)"
         }
@@ -3684,6 +3670,18 @@ public struct EditorRootView: View {
         workspace.exportPreset(id: selectedExportPresetID) ?? workspace.exportPresets.first
     }
 
+    private var activeExportJob: RenderJob? {
+        workspace.renderEngine.currentJob()
+    }
+
+    private var activeExportPresetName: String {
+        guard let job = activeExportJob,
+              let preset = workspace.exportPreset(id: job.presetID) else {
+            return selectedExportPreset?.name ?? "Export"
+        }
+        return preset.name
+    }
+
     private var clipCount: Int {
         videoClips.count
     }
@@ -4596,7 +4594,7 @@ public struct EditorRootView: View {
                 }
                 .disabled(workspace.missingAssets.isEmpty)
 
-                quickStartActionButton("Generate Proxies", systemImage: "externaldrive.badge.plus") {
+                quickStartActionButton("Create Proxy Manifest", systemImage: "externaldrive.badge.plus") {
                     enterEditor()
                     workspace.generateProxyManifest()
                 }
@@ -5783,7 +5781,11 @@ public struct EditorRootView: View {
                     toolbarButton("Trim In", systemImage: "arrow.right.to.line.compact") { workspace.trimSelectedClipLeading(by: 0.1) }
                     toolbarButton("Trim Out", systemImage: "arrow.left.to.line.compact") { workspace.trimSelectedClipTrailing(by: 0.1) }
                     toolbarButton("Slip -", systemImage: "arrow.left.and.line.vertical.and.arrow.right") { workspace.slipSelectedClip(by: -0.1) }
+                        .disabled(!workspace.canSlipSelectedClip)
+                        .help("Slip selected clip content backward by 0.1 seconds.")
                     toolbarButton("Slip +", systemImage: "arrow.right.and.line.vertical.and.arrow.left") { workspace.slipSelectedClip(by: 0.1) }
+                        .disabled(!workspace.canSlipSelectedClip)
+                        .help("Slip selected clip content forward by 0.1 seconds.")
                     toolbarButton("Delete Sel", systemImage: "trash") { workspace.rippleDeleteSelectedClip() }
                     Divider().frame(height: 18)
                     toolbarButton("Captions", systemImage: "captions.bubble") { workspace.runAutoCaptions() }
@@ -5825,7 +5827,7 @@ public struct EditorRootView: View {
                         }
                     }
                     .help(workspace.exportSupportMessage)
-                    toolbarButton("Proxy Manifest", systemImage: "externaldrive.badge.icloud") {
+                    toolbarButton("Create Proxy Manifest", systemImage: "externaldrive.badge.icloud") {
                         workspace.generateProxyManifest()
                     }
                     .help("Writes proxy manifest only; actual proxy media not generated in this prototype.")
@@ -5833,7 +5835,7 @@ public struct EditorRootView: View {
                         Button("Open Export Queue Panel") { showsExportQueue = true }
                         Divider()
                         if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
-                            Label("\(workspace.exportStatusMessage) • \(Int(workspace.exportProgress * 100))%", systemImage: "clock")
+                            Label("\(activeExportPresetName) • \(Int(workspace.exportProgress * 100))%", systemImage: "clock")
                             Button("Cancel Current Export") { workspace.cancelExport() }
                         } else {
                             Label("No active export", systemImage: "checkmark.circle")
@@ -5841,6 +5843,14 @@ public struct EditorRootView: View {
                         Divider()
                         Button(workspace.exportSupportMessage) {}
                             .disabled(true)
+                        switch workspace.exportSupportStatus {
+                        case .missingMedia:
+                            Button("Relink Missing Media") { workspace.relinkFirstMissingAssetUsingDialog() }
+                        case .emptySequence:
+                            Button("Append First Clip") { workspace.appendFirstAssetToTimeline() }
+                        case .ready, .unsupported:
+                            EmptyView()
+                        }
                         if let latest = workspace.exportHistory.first {
                             Button("Open Last Export") { workspace.openExportOutput(latest) }
                             Button("Reveal Last Export") { workspace.revealExportOutput(latest) }
@@ -6839,7 +6849,7 @@ public struct EditorRootView: View {
                             ])
                         }
                         inspectorGroup("Export Queue", rows: [
-                            ("Preset", selectedExportPreset?.name ?? "Default"),
+                            ("Preset", activeExportPresetName),
                             ("Status", workspace.exportStatusMessage),
                             ("Progress", "\(Int(workspace.exportProgress * 100))%"),
                             ("Completed", "\(workspace.exportHistory.count)")
@@ -7057,6 +7067,9 @@ public struct EditorRootView: View {
 
             if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
                 HStack(spacing: 8) {
+                    Text(activeExportPresetName)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
                     ProgressView(value: workspace.exportProgress)
                     Text("\(Int(workspace.exportProgress * 100))%")
                         .font(.caption.monospacedDigit())
@@ -7071,9 +7084,15 @@ public struct EditorRootView: View {
                 .background(Color.white.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             } else {
-                Text("No active export")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("No active export")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(workspace.exportSupportMessage)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    exportSupportActionRow
+                }
             }
 
             Divider()
@@ -7141,6 +7160,8 @@ public struct EditorRootView: View {
 
             if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
                 HStack(spacing: 10) {
+                    Text(activeExportPresetName)
+                        .font(.caption.weight(.semibold))
                     Text(workspace.exportStatusMessage)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -7155,9 +7176,15 @@ public struct EditorRootView: View {
                 .background(Color.white.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             } else {
-                Text("No active export")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("No active export")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(workspace.exportSupportMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    exportSupportActionRow
+                }
             }
 
             Divider()
@@ -7206,6 +7233,24 @@ public struct EditorRootView: View {
         }
         .padding(16)
         .frame(minWidth: 560, minHeight: 380)
+    }
+
+    @ViewBuilder
+    private var exportSupportActionRow: some View {
+        switch workspace.exportSupportStatus {
+        case .missingMedia:
+            Button("Relink Missing Media") {
+                workspace.relinkFirstMissingAssetUsingDialog()
+            }
+            .buttonStyle(.bordered)
+        case .emptySequence:
+            Button("Append First Clip") {
+                workspace.appendFirstAssetToTimeline()
+            }
+            .buttonStyle(.bordered)
+        case .ready, .unsupported:
+            EmptyView()
+        }
     }
 
     private func retryExportHistory(_ item: EditorWorkspace.ExportHistoryItem) {
@@ -7892,6 +7937,6 @@ private struct MediaViewerSurface: View {
     public enum ExportSupportStatus: Equatable {
         case ready
         case unsupported(String)
-        case missingMedia(Int)
+        case missingMedia(String)
         case emptySequence
     }

@@ -73,7 +73,7 @@ struct PremierCloneApplication: App {
 
                 Divider()
 
-                Button("Generate Proxy Manifest") {
+                Button("Create Proxy Manifest") {
                     EditorCommand.post(EditorCommand.generateProxyManifest)
                 }
                 .keyboardShortcut("p", modifiers: [.command, .option])
