@@ -328,15 +328,39 @@ public final class EditorWorkspace: ObservableObject {
             return .missingMedia(missingAssets.count)
         }
 
-        // Prototype limitation: exports are simulated only
-        return .simulatedOnly
+        #if !canImport(AVFoundation)
+        return .unsupported("AVFoundation export is unavailable on this platform.")
+        #else
+        guard let sequence = activeSequence else {
+            return .unsupported("No active sequence selected.")
+        }
+
+        // Mirror RenderCore preflight constraints so we can tell the user what to fix before exporting.
+        if sequence.videoTracks.count > 1 {
+            return .unsupported("Multiple video tracks are not supported yet. Merge down to a single video track.")
+        }
+        if sequence.audioTracks.count > 1 {
+            return .unsupported("Multiple audio tracks are not supported yet. Merge down to a single audio track.")
+        }
+
+        if let track = sequence.videoTracks.first,
+           let issue = exportPreflightIssue(in: track) {
+            return .unsupported(issue)
+        }
+        if let track = sequence.audioTracks.first,
+           let issue = exportPreflightIssue(in: track) {
+            return .unsupported(issue)
+        }
+
+        return .ready
+        #endif
     }
 
     public var canExport: Bool {
         switch exportSupportStatus {
-        case .ready, .simulatedOnly:
+        case .ready:
             return true
-        case .missingMedia, .emptySequence:
+        case .missingMedia, .emptySequence, .unsupported:
             return false
         }
     }
@@ -344,14 +368,42 @@ public final class EditorWorkspace: ObservableObject {
     public var exportSupportMessage: String {
         switch exportSupportStatus {
         case .ready:
-            return "Export supported for this sequence."
-        case .simulatedOnly:
-            return "Exports are simulated in this prototype; encoded output may not match timeline playback."
+            return "Export ready (prototype: 1 video + 1 audio track; no effects/transforms/gain yet)."
         case .missingMedia(let count):
-            return "\(count) asset(s) need relink before export."
+            return "\(count) missing file(s). Relink media before exporting."
+        case .unsupported(let reason):
+            return "Export not supported: \(reason)"
         case .emptySequence:
             return "Add clips to the sequence before exporting."
         }
+    }
+
+    private func exportPreflightIssue(in track: TimelineTrack) -> String? {
+        let sorted = track.clips.sorted { $0.timelineIn < $1.timelineIn }
+        for (index, clip) in sorted.enumerated() {
+            if !clip.effects.isEmpty {
+                return "Effects are not supported for export yet. Remove effects from clips."
+            }
+            if clip.transforms.opacity != 1 ||
+                clip.transforms.scaleX != 1 ||
+                clip.transforms.scaleY != 1 ||
+                clip.transforms.positionX != 0 ||
+                clip.transforms.positionY != 0 {
+                return "Clip transforms are not supported for export yet. Reset transform values to defaults."
+            }
+            if clip.gain != 1 {
+                return "Clip gain is not supported for export yet. Reset gain to 1.0."
+            }
+
+            if index > 0 {
+                let previous = sorted[index - 1]
+                if clip.timelineIn < previous.timelineIn + previous.duration {
+                    return "Overlapping clips are not supported for export yet. Remove overlaps."
+                }
+            }
+        }
+
+        return nil
     }
 
     public func exportPreset(id: String) -> ExportPreset? {
@@ -1125,15 +1177,28 @@ public final class EditorWorkspace: ObservableObject {
     }
 
     public func enqueueExport(presetID: String = "youtube-1080p-h264") {
-        guard let sequence = activeSequence else { return }
+        guard let sequence = activeSequence else {
+            statusMessage = "No active sequence to export"
+            return
+        }
+        guard canExport else {
+            exportStatusMessage = "Blocked"
+            statusMessage = exportSupportMessage
+            return
+        }
+        guard let preset = exportPreset(id: presetID) else {
+            statusMessage = "Unknown export preset"
+            return
+        }
 
         do {
             _ = try renderEngine.enqueue(projectID: project.id, sequenceID: sequence.id, presetID: presetID)
             exportProgress = 0
-            exportStatusMessage = "Rendering \(presetID)"
-            startExportProgressSimulation()
-            statusMessage = "Export job started (\(presetID))"
+            exportStatusMessage = "Rendering \(preset.name)"
+            statusMessage = "Export job started (\(preset.name))"
+            startExportTask(sequence: sequence, preset: preset)
         } catch {
+            exportStatusMessage = "Failed"
             statusMessage = "Export failed: \(error.localizedDescription)"
         }
     }
@@ -1143,6 +1208,7 @@ public final class EditorWorkspace: ObservableObject {
         exportProgressTask = nil
         exportProgress = 0
         exportStatusMessage = "Cancelled"
+        renderEngine.cancelCurrentExport()
         _ = try? renderEngine.failCurrentJob()
         statusMessage = "Export cancelled"
     }
@@ -3151,32 +3217,52 @@ public final class EditorWorkspace: ObservableObject {
         }
     }
 
-    private func startExportProgressSimulation() {
+    private func startExportTask(sequence: EditorSequence, preset: ExportPreset) {
         exportProgressTask?.cancel()
         exportProgressTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(250))
-                guard let self else { return }
-
+            guard let self else { return }
+            guard let job = self.renderEngine.currentJob() else {
                 await MainActor.run {
-                    self.exportProgress = min(1.0, self.exportProgress + 0.03)
+                    self.exportStatusMessage = "Failed"
+                    self.statusMessage = "Export failed: no active render job"
+                }
+                return
+            }
 
-                    if self.exportProgress >= 1.0 {
-                        self.exportProgressTask?.cancel()
-                        self.exportProgressTask = nil
-                        if let completed = try? self.renderEngine.completeCurrentJob() {
-                            self.completedExports.insert(completed, at: 0)
-                            if let preset = self.exportPreset(id: completed.presetID),
-                               let sequence = self.project.sequences.first(where: { $0.id == completed.sequenceID }),
-                               let artifact = try? self.writeExportArtifact(for: completed, preset: preset, sequence: sequence),
-                               let historyItem = self.buildExportHistoryItem(for: completed, artifact: artifact) {
-                                self.exportHistory.insert(historyItem, at: 0)
-                            }
-                        }
-                        self.exportStatusMessage = "Completed"
-                        self.statusMessage = "Export completed"
+            do {
+                let artifact = try self.writeExportArtifact(for: job, preset: preset, sequence: sequence)
+                try await self.renderEngine.export(
+                    project: self.project,
+                    sequence: sequence,
+                    preset: preset,
+                    outputURL: artifact.outputFileURL
+                ) { progress in
+                    Task { @MainActor in
+                        self.exportProgress = progress
                     }
                 }
+
+                let completed = try self.renderEngine.completeCurrentJob()
+                await MainActor.run {
+                    self.exportProgress = 1
+                    self.exportStatusMessage = "Completed"
+                    self.completedExports.insert(completed, at: 0)
+                    if let historyItem = self.buildExportHistoryItem(for: completed, artifact: artifact) {
+                        self.exportHistory.insert(historyItem, at: 0)
+                    }
+                    self.statusMessage = "Export completed"
+                }
+            } catch {
+                _ = try? self.renderEngine.failCurrentJob()
+                await MainActor.run {
+                    self.exportProgress = 0
+                    self.exportStatusMessage = "Failed"
+                    self.statusMessage = "Export failed: \(error.localizedDescription)"
+                }
+            }
+
+            await MainActor.run {
+                self.exportProgressTask = nil
             }
         }
     }
@@ -3443,6 +3529,7 @@ public struct EditorRootView: View {
     @State private var leftResizeStartWidth: CGFloat?
     @State private var rightResizeStartWidth: CGFloat?
     @State private var centerResizeStartHeight: CGFloat?
+    @State private var showsExportBlockedAlert = false
     private let timelineZoomBounds: ClosedRange<Double> = 0.6...2.2
     private let viewerZoomBounds: ClosedRange<Double> = 0.6...2.5
     private let panelWidthBounds: ClosedRange<Double> = 145...420
@@ -3451,6 +3538,37 @@ public struct EditorRootView: View {
     @State private var isScrubbingProgramPlayback = false
 
     public init() {}
+
+    private struct ExportBlockedAlertModifier: ViewModifier {
+        @Binding var isPresented: Bool
+        @Binding var showsExportQueue: Bool
+        @ObservedObject var workspace: EditorWorkspace
+        var enterEditor: () -> Void
+
+        func body(content: Content) -> some View {
+            content.alert("Export Unavailable", isPresented: $isPresented) {
+                if case .missingMedia = workspace.exportSupportStatus {
+                    Button("Relink Missing Media") {
+                        enterEditor()
+                        workspace.relinkFirstMissingAssetUsingDialog()
+                    }
+                } else if case .emptySequence = workspace.exportSupportStatus {
+                    Button("Append First Clip") {
+                        enterEditor()
+                        workspace.appendFirstAssetToTimeline()
+                    }
+                } else if case .unsupported = workspace.exportSupportStatus {
+                    Button("Open Export Queue") {
+                        enterEditor()
+                        showsExportQueue = true
+                    }
+                }
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(workspace.exportSupportMessage)
+            }
+        }
+    }
 
     private enum WorkspaceStage {
         case home
@@ -3708,43 +3826,56 @@ public struct EditorRootView: View {
     }
 
     public var body: some View {
-        GeometryReader { geometry in
-            let width = geometry.size.width
-            let compactEditor = width < 1320
-            let narrowEditor = width < 1120
+        let baseView = AnyView(
+            GeometryReader { geometry in
+                let width = geometry.size.width
+                let compactEditor = width < 1320
+                let narrowEditor = width < 1120
 
-            ZStack {
-                Color(red: 0.11, green: 0.11, blue: 0.12)
-                .ignoresSafeArea()
+                ZStack {
+                    Color(red: 0.11, green: 0.11, blue: 0.12)
+                    .ignoresSafeArea()
 
-                if workspaceStage == .home {
-                    homeScreen(compact: width < 1100)
-                } else {
-                    editorWorkspace(compact: compactEditor, narrow: narrowEditor)
-                        .overlay(alignment: .topTrailing) {
-                            if workspace.showsShortcutHelp {
-                                shortcutsOverlay
-                                    .padding(14)
+                    if workspaceStage == .home {
+                        homeScreen(compact: width < 1100)
+                    } else {
+                        editorWorkspace(compact: compactEditor, narrow: narrowEditor)
+                            .overlay(alignment: .topTrailing) {
+                                if workspace.showsShortcutHelp {
+                                    shortcutsOverlay
+                                        .padding(14)
+                                }
                             }
-                        }
+                    }
                 }
             }
-        }
-        .frame(minWidth: 960, minHeight: 620)
-        .sheet(isPresented: $showsExportQueue) {
-            exportQueueSheet
-        }
-        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.newProject)) { _ in
-            workspace.createNewProject()
-            enterEditor()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: EditorCommand.openProject)) { _ in
-            let previousProjectURL = workspace.currentProjectBundleURL
-            workspace.openProjectUsingDialog()
-            if workspace.currentProjectBundleURL != nil || workspace.currentProjectBundleURL != previousProjectURL {
-                enterEditor()
-            }
-        }
+        )
+
+        return AnyView(
+            baseView
+                .frame(minWidth: 960, minHeight: 620)
+                .modifier(
+                    ExportBlockedAlertModifier(
+                        isPresented: $showsExportBlockedAlert,
+                        showsExportQueue: $showsExportQueue,
+                        workspace: workspace,
+                        enterEditor: { enterEditor() }
+                    )
+                )
+                .sheet(isPresented: $showsExportQueue) {
+                    exportQueueSheet
+                }
+                .onReceive(NotificationCenter.default.publisher(for: EditorCommand.newProject)) { _ in
+                    workspace.createNewProject()
+                    enterEditor()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: EditorCommand.openProject)) { _ in
+                    let previousProjectURL = workspace.currentProjectBundleURL
+                    workspace.openProjectUsingDialog()
+                    if workspace.currentProjectBundleURL != nil || workspace.currentProjectBundleURL != previousProjectURL {
+                        enterEditor()
+                    }
+                }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.saveProject)) { _ in
             enterEditor()
             workspace.saveProject()
@@ -4005,6 +4136,7 @@ public struct EditorRootView: View {
         .onChange(of: trackLaneHeight) { _ in
             persistWorkspaceLayout()
         }
+        )
     }
 
     private func editorWorkspace(compact: Bool, narrow: Bool) -> some View {
@@ -5689,9 +5821,10 @@ public struct EditorRootView: View {
                             workspace.enqueueExport(presetID: selectedExportPreset?.id ?? "youtube-1080p-h264")
                         } else {
                             workspace.statusMessage = workspace.exportSupportMessage
+                            showsExportBlockedAlert = true
                         }
                     }
-                    .disabled(!workspace.canExport)
+                    .help(workspace.exportSupportMessage)
                     toolbarButton("Proxy Manifest", systemImage: "externaldrive.badge.icloud") {
                         workspace.generateProxyManifest()
                     }
@@ -5700,15 +5833,14 @@ public struct EditorRootView: View {
                         Button("Open Export Queue Panel") { showsExportQueue = true }
                         Divider()
                         if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
-                            Label("Rendering… \(Int(workspace.exportProgress * 100))%", systemImage: "clock")
+                            Label("\(workspace.exportStatusMessage) • \(Int(workspace.exportProgress * 100))%", systemImage: "clock")
                             Button("Cancel Current Export") { workspace.cancelExport() }
                         } else {
                             Label("No active export", systemImage: "checkmark.circle")
                         }
                         Divider()
-                        Label(workspace.exportSupportMessage, systemImage: "info.circle")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        Button(workspace.exportSupportMessage) {}
+                            .disabled(true)
                         if let latest = workspace.exportHistory.first {
                             Button("Open Last Export") { workspace.openExportOutput(latest) }
                             Button("Reveal Last Export") { workspace.revealExportOutput(latest) }
@@ -5722,9 +5854,6 @@ public struct EditorRootView: View {
                     }
                     .buttonStyle(.bordered)
                     .tint(Color(red: 0.40, green: 0.40, blue: 0.43))
-                    if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
-                        toolbarButton("Cancel Export", systemImage: "xmark.circle") { workspace.cancelExport() }
-                    }
                     Divider().frame(height: 18)
                     Button("Mode: \(workspace.activeSequence?.mode.rawValue.capitalized ?? "N/A")") {
                         workspace.switchTimelineMode()
@@ -7012,6 +7141,9 @@ public struct EditorRootView: View {
 
             if workspace.exportProgress > 0 && workspace.exportProgress < 1 {
                 HStack(spacing: 10) {
+                    Text(workspace.exportStatusMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     ProgressView(value: workspace.exportProgress)
                     Text("\(Int(workspace.exportProgress * 100))%")
                         .font(.caption.monospacedDigit())
@@ -7759,7 +7891,7 @@ private struct MediaViewerSurface: View {
 #endif
     public enum ExportSupportStatus: Equatable {
         case ready
-        case simulatedOnly
+        case unsupported(String)
         case missingMedia(Int)
         case emptySequence
     }
