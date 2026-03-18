@@ -74,6 +74,35 @@ final class TimelineCoreTests: XCTestCase {
         XCTAssertEqual(clipStarts, [0, 5, 8])
     }
 
+    func testSlipClipStaysWithinAssetDuration() throws {
+        let engine = TimelineEngine()
+        var project = makeProject(includeSecondClip: false)
+
+        // Ensure asset duration known
+        let assetID = project.sequences[0].videoTracks[0].clips[0].assetID
+        project.assets = [MediaAsset(name: "A", path: "/tmp/a.mp4", type: .video, duration: 8)]
+        project.sequences[0].videoTracks[0].clips[0].assetID = assetID
+
+        let sequence = try XCTUnwrap(project.sequences.first)
+        let track = try XCTUnwrap(sequence.videoTracks.first)
+        let clip = try XCTUnwrap(track.clips.first)
+
+        let result = try engine.apply(
+            operation: .slipClip(
+                sequenceID: sequence.id,
+                trackID: track.id,
+                trackKind: .video,
+                clipID: clip.id,
+                deltaSource: 1.0
+            ),
+            to: project
+        )
+
+        let updatedClip = try XCTUnwrap(result.0.sequences.first?.videoTracks.first?.clips.first)
+        XCTAssertEqual(updatedClip.inTime, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(updatedClip.outTime, 6.0, accuracy: 0.0001)
+    }
+
     private func makeProject(includeSecondClip: Bool = false) -> Project {
         let clip1 = ClipRef(assetID: UUID(), inTime: 0, outTime: 5, timelineIn: 0)
         var clips = [clip1]

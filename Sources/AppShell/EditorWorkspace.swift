@@ -20,6 +20,7 @@ import AppKit
 import UniformTypeIdentifiers
 #endif
 
+
 public enum EditorCommand {
     public static let newProject = Notification.Name("EditorCommand.newProject")
     public static let openProject = Notification.Name("EditorCommand.openProject")
@@ -1874,6 +1875,35 @@ public final class EditorWorkspace: ObservableObject {
         }
     }
 
+    public func slipSelectedClip(by seconds: TimeInterval) {
+        guard let sequence = activeSequence, let selection = clipSelection else {
+            statusMessage = "Select a clip first"
+            return
+        }
+        guard !isTrackLocked(selection.trackID) else {
+            statusMessage = "Track is locked"
+            return
+        }
+        recordUndoSnapshot()
+
+        do {
+            let result = try timelineEngine.apply(
+                operation: .slipClip(
+                    sequenceID: sequence.id,
+                    trackID: selection.trackID,
+                    trackKind: selection.kind,
+                    clipID: selection.clip.id,
+                    deltaSource: seconds
+                ),
+                to: project
+            )
+            project = result.0
+            statusMessage = "Slipped clip content"
+        } catch {
+            statusMessage = "Slip failed: \(error.localizedDescription)"
+        }
+    }
+
     public func trimSelectedClipLeading(by delta: TimeInterval) {
         guard let sequence = activeSequence, let selection = clipSelection else {
             statusMessage = "Select a clip first"
@@ -2342,6 +2372,11 @@ public final class EditorWorkspace: ObservableObject {
 
     public func seekBy(_ seconds: TimeInterval) {
         updatePlayhead(to: playheadTime + seconds)
+    }
+
+    public func updatePlayheadFromPlayback(_ newTime: TimeInterval) {
+        // Real playback updates should not stop the user playback session.
+        playheadTime = min(max(0, newTime), activeSequence?.duration ?? newTime)
     }
 
     public func updateSourcePlayhead(to newTime: TimeInterval) {
@@ -3372,6 +3407,9 @@ public final class EditorWorkspace: ObservableObject {
 
 public struct EditorRootView: View {
     @EnvironmentObject private var workspace: EditorWorkspace
+    #if canImport(AVKit) && canImport(AVFoundation)
+    @StateObject private var programPlayer = TimelineProgramPlayer()
+    #endif
     @State private var workspaceStage: WorkspaceStage = .home
     @State private var browserTab: BrowserTab = .libraries
     @State private var inspectorTab: InspectorTab = .video
@@ -3410,6 +3448,7 @@ public struct EditorRootView: View {
     private let panelWidthBounds: ClosedRange<Double> = 145...420
     private let viewerPaneHeightBounds: ClosedRange<Double> = 220...900
     private let trackLaneHeightBounds: ClosedRange<Double> = 44...96
+    @State private var isScrubbingProgramPlayback = false
 
     public init() {}
 
@@ -3754,35 +3793,35 @@ public struct EditorRootView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.playPause)) { _ in
             enterEditor()
-            workspace.togglePlayback()
+            toggleProgramPlayback()
         }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.jumpToStart)) { _ in
             enterEditor()
-            workspace.jumpToStart()
+            seekProgram(to: 0)
         }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.jumpToEnd)) { _ in
             enterEditor()
-            workspace.jumpToEnd()
+            seekProgram(to: workspace.activeSequence?.duration ?? 0)
         }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.stepBackwardFrame)) { _ in
             enterEditor()
-            workspace.stepFrame(-1)
+            stepProgramFrame(-1)
         }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.stepForwardFrame)) { _ in
             enterEditor()
-            workspace.stepFrame(1)
+            stepProgramFrame(1)
         }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.shuttleBackward)) { _ in
             enterEditor()
-            workspace.shuttleBackward()
+            seekProgramBy(-1)
         }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.shuttleStop)) { _ in
             enterEditor()
-            workspace.shuttleStop()
+            pauseProgramPlayback(userInitiated: true)
         }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.shuttleForward)) { _ in
             enterEditor()
-            workspace.shuttleForward()
+            startProgramPlayback()
         }
         .onReceive(NotificationCenter.default.publisher(for: EditorCommand.previousEditPoint)) { _ in
             enterEditor()
@@ -3895,14 +3934,22 @@ public struct EditorRootView: View {
         .onAppear {
             restoreWorkspaceLayoutFromProject()
             ensureSelectedBrowserBin()
+            rebuildProgramPlayer()
         }
         .onChange(of: workspace.project.id) { _ in
             workspaceStage = .editor
             restoreWorkspaceLayoutFromProject()
             ensureSelectedBrowserBin()
+            rebuildProgramPlayer()
         }
         .onChange(of: workspace.currentProjectBundleURL) { _ in
             restoreWorkspaceLayoutFromProject()
+        }
+        .onChange(of: workspace.activeSequenceID) { _ in
+            rebuildProgramPlayer()
+        }
+        .onChange(of: workspace.project.sequences) { _ in
+            rebuildProgramPlayer()
         }
         .onChange(of: workspace.project.bins.map(\.id)) { _ in
             ensureSelectedBrowserBin()
@@ -3924,6 +3971,21 @@ public struct EditorRootView: View {
         }
         .onChange(of: programViewerZoom) { _ in
             persistWorkspaceLayout()
+        }
+        .onChange(of: workspace.playheadTime) { _ in
+            // When the user scrubs or jumps while paused, we want the real program player to seek.
+            guard !workspace.isPlaying else { return }
+            guard !isScrubbingProgramPlayback else { return }
+            seekProgram(to: workspace.playheadTime)
+        }
+        .onChange(of: workspace.playbackRate) { _ in
+            syncProgramPlaybackRate()
+        }
+        .onChange(of: workspace.previewVolume) { _ in
+            syncProgramAudioSettings()
+        }
+        .onChange(of: workspace.isPreviewMuted) { _ in
+            syncProgramAudioSettings()
         }
         .onChange(of: inspectorPlacement) { _ in
             persistWorkspaceLayout()
@@ -4567,6 +4629,105 @@ public struct EditorRootView: View {
 
     private func enterEditor() {
         workspaceStage = .editor
+    }
+
+    private func rebuildProgramPlayer() {
+        #if canImport(AVKit) && canImport(AVFoundation)
+        programPlayer.onTimeUpdate = { [weak workspace] seconds in
+            Task { @MainActor in
+                guard let workspace else { return }
+                guard workspace.isPlaying else { return }
+                workspace.updatePlayheadFromPlayback(seconds)
+            }
+        }
+        programPlayer.onPlaybackEnded = { [weak workspace] in
+            Task { @MainActor in
+                guard let workspace else { return }
+                workspace.isPlaying = false
+                workspace.statusMessage = "Reached end"
+            }
+        }
+        programPlayer.rebuild(sequence: workspace.activeSequence, assets: workspace.project.assets, fps: workspace.project.fps)
+        // Keep the program player aligned to the current playhead when rebuilding.
+        programPlayer.seek(to: workspace.playheadTime)
+        syncProgramAudioSettings()
+        syncProgramPlaybackRate()
+        #endif
+    }
+
+    private func syncProgramAudioSettings() {
+        #if canImport(AVKit) && canImport(AVFoundation)
+        programPlayer.player.isMuted = workspace.isPreviewMuted
+        programPlayer.player.volume = Float(min(1.0, max(0, workspace.previewVolume)))
+        #endif
+    }
+
+    private func syncProgramPlaybackRate() {
+        #if canImport(AVKit) && canImport(AVFoundation)
+        guard workspace.isPlaying else { return }
+        programPlayer.player.rate = Float(min(4.0, max(0.25, workspace.playbackRate)))
+        #endif
+    }
+
+    private func toggleProgramPlayback() {
+        if workspace.isPlaying {
+            pauseProgramPlayback(userInitiated: true)
+        } else {
+            startProgramPlayback()
+        }
+    }
+
+    private func startProgramPlayback() {
+        guard let sequence = workspace.activeSequence else {
+            workspace.statusMessage = "No active sequence"
+            return
+        }
+        guard sequence.duration > 0 else {
+            workspace.statusMessage = "Timeline is empty"
+            return
+        }
+        #if canImport(AVKit) && canImport(AVFoundation)
+        // Stop the legacy simulated loop by flipping the flag before real playback begins.
+        workspace.isPlaying = false
+        rebuildProgramPlayer()
+        programPlayer.seek(to: workspace.playheadTime)
+        programPlayer.play(rate: workspace.playbackRate)
+        workspace.isPlaying = true
+        workspace.statusMessage = "Playing"
+        #else
+        workspace.startPlayback()
+        #endif
+    }
+
+    private func pauseProgramPlayback(userInitiated: Bool) {
+        #if canImport(AVKit) && canImport(AVFoundation)
+        programPlayer.pause()
+        workspace.isPlaying = false
+        if userInitiated {
+            workspace.statusMessage = "Paused at \(workspace.timecode(workspace.playheadTime))"
+        }
+        #else
+        workspace.pausePlayback(userInitiated: userInitiated)
+        #endif
+    }
+
+    private func seekProgram(to newTime: TimeInterval) {
+        let clamped = min(max(0, newTime), workspace.activeSequence?.duration ?? newTime)
+        isScrubbingProgramPlayback = true
+        workspace.updatePlayhead(to: clamped)
+        isScrubbingProgramPlayback = false
+        #if canImport(AVKit) && canImport(AVFoundation)
+        programPlayer.seek(to: clamped)
+        #endif
+    }
+
+    private func seekProgramBy(_ seconds: TimeInterval) {
+        seekProgram(to: workspace.playheadTime + seconds)
+    }
+
+    private func stepProgramFrame(_ deltaFrames: Int) {
+        let frameDuration = 1.0 / max(1, workspace.project.fps)
+        seekProgram(to: workspace.playheadTime + (Double(deltaFrames) * frameDuration))
     }
 
     private func ensureSelectedBrowserBin() {
@@ -5408,7 +5569,7 @@ public struct EditorRootView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     toolbarButton("Home", systemImage: "house") {
-                        workspace.pausePlayback(userInitiated: false)
+                        pauseProgramPlayback(userInitiated: false)
                         workspaceStage = .home
                     }
                     toolbarButton("New", systemImage: "plus.square") { workspace.createNewProject() }
@@ -5489,6 +5650,8 @@ public struct EditorRootView: View {
                     toolbarButton("Nudge +", systemImage: "arrow.right") { workspace.nudgeSelectedClips(by: 0.5) }
                     toolbarButton("Trim In", systemImage: "arrow.right.to.line.compact") { workspace.trimSelectedClipLeading(by: 0.1) }
                     toolbarButton("Trim Out", systemImage: "arrow.left.to.line.compact") { workspace.trimSelectedClipTrailing(by: 0.1) }
+                    toolbarButton("Slip -", systemImage: "arrow.left.and.line.vertical.and.arrow.right") { workspace.slipSelectedClip(by: -0.1) }
+                    toolbarButton("Slip +", systemImage: "arrow.right.and.line.vertical.and.arrow.left") { workspace.slipSelectedClip(by: 0.1) }
                     toolbarButton("Delete Sel", systemImage: "trash") { workspace.rippleDeleteSelectedClip() }
                     Divider().frame(height: 18)
                     toolbarButton("Captions", systemImage: "captions.bubble") { workspace.runAutoCaptions() }
@@ -5580,11 +5743,11 @@ public struct EditorRootView: View {
 
     private func transportButtons(usesSpacer: Bool = true) -> some View {
         HStack(spacing: 6) {
-            tinyRoundButton("backward.end.fill") { workspace.jumpToStart() }
-            tinyRoundButton("backward.frame.fill") { workspace.stepFrame(-1) }
-            tinyRoundButton(workspace.isPlaying ? "pause.fill" : "play.fill") { workspace.togglePlayback() }
-            tinyRoundButton("forward.frame.fill") { workspace.stepFrame(1) }
-            tinyRoundButton("forward.end.fill") { workspace.jumpToEnd() }
+            tinyRoundButton("backward.end.fill") { seekProgram(to: 0) }
+            tinyRoundButton("backward.frame.fill") { stepProgramFrame(-1) }
+            tinyRoundButton(workspace.isPlaying ? "pause.fill" : "play.fill") { toggleProgramPlayback() }
+            tinyRoundButton("forward.frame.fill") { stepProgramFrame(1) }
+            tinyRoundButton("forward.end.fill") { seekProgram(to: workspace.activeSequence?.duration ?? 0) }
             tinyRoundButton("inset.filled.left") { workspace.setInPointAtPlayhead() }
             tinyRoundButton("inset.filled.right") { workspace.setOutPointAtPlayhead() }
             tinyRoundButton(workspace.isLoopPlaybackEnabled ? "repeat.circle.fill" : "repeat.circle") {
@@ -5656,7 +5819,7 @@ public struct EditorRootView: View {
             .background(Color(red: 0.18, green: 0.18, blue: 0.19))
 
             ZStack(alignment: .bottomLeading) {
-                viewerSurface(descriptor: descriptor)
+                viewerSurface(descriptor: descriptor, kind: kind)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .scaleEffect(viewerZoom(for: kind))
                     .animation(.easeOut(duration: 0.12), value: viewerZoom(for: kind))
@@ -5748,9 +5911,9 @@ public struct EditorRootView: View {
     private var programViewerControls: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                tinyRoundButton("gobackward.10") { workspace.seekBy(-10) }
-                tinyRoundButton(workspace.isPlaying ? "pause.fill" : "play.fill") { workspace.togglePlayback() }
-                tinyRoundButton("goforward.10") { workspace.seekBy(10) }
+                tinyRoundButton("gobackward.10") { seekProgramBy(-10) }
+                tinyRoundButton(workspace.isPlaying ? "pause.fill" : "play.fill") { toggleProgramPlayback() }
+                tinyRoundButton("goforward.10") { seekProgramBy(10) }
                 tinyRoundButton(workspace.isPreviewMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
                     workspace.togglePreviewMute()
                 }
@@ -5765,7 +5928,12 @@ public struct EditorRootView: View {
                 Slider(
                     value: Binding(
                         get: { workspace.playheadTime },
-                        set: { workspace.updatePlayhead(to: $0) }
+                        set: { newValue in
+                            isScrubbingProgramPlayback = true
+                            workspace.updatePlayhead(to: newValue)
+                            seekProgram(to: newValue)
+                            isScrubbingProgramPlayback = false
+                        }
                     ),
                     in: 0...max(1.0, activeSequence?.duration ?? 1.0)
                 )
@@ -5778,16 +5946,20 @@ public struct EditorRootView: View {
     }
 
     @ViewBuilder
-    private func viewerSurface(descriptor: ViewerDescriptor) -> some View {
+    private func viewerSurface(descriptor: ViewerDescriptor, kind: ViewerKind) -> some View {
         #if canImport(AVKit) && canImport(AVFoundation)
-        MediaViewerSurface(
-            asset: descriptor.asset,
-            seekTime: descriptor.seekTime,
-            shouldPlay: descriptor.shouldPlay,
-            playbackRate: workspace.playbackRate,
-            volume: workspace.previewVolume,
-            isMuted: workspace.isPreviewMuted
-        )
+        if kind == .program {
+            programViewerSurface
+        } else {
+            MediaViewerSurface(
+                asset: descriptor.asset,
+                seekTime: descriptor.seekTime,
+                shouldPlay: descriptor.shouldPlay,
+                playbackRate: workspace.playbackRate,
+                volume: workspace.previewVolume,
+                isMuted: workspace.isPreviewMuted
+            )
+        }
         #else
         Rectangle()
             .fill(Color.black.opacity(0.92))
@@ -5798,6 +5970,36 @@ public struct EditorRootView: View {
             }
         #endif
     }
+
+    #if canImport(AVKit) && canImport(AVFoundation)
+    private var programViewerSurface: some View {
+        ZStack {
+            if programPlayer.hasContent {
+                VideoPlayer(player: programPlayer.player)
+            } else {
+                Rectangle()
+                    .fill(Color.black.opacity(0.92))
+                    .overlay {
+                        VStack(spacing: 10) {
+                            Image(systemName: "play.rectangle")
+                                .font(.system(size: 34))
+                                .foregroundStyle(.white.opacity(0.55))
+                            Text("No Program Clip")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.white.opacity(0.85))
+                            Text("Append clips to timeline to preview sequence")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+            }
+        }
+        .onAppear {
+            rebuildProgramPlayer()
+            syncProgramAudioSettings()
+        }
+    }
+    #endif
 
     private var timelinePanel: some View {
         VStack(spacing: 0) {
@@ -7108,6 +7310,182 @@ public struct EditorRootView: View {
 }
 
 #if canImport(AVKit) && canImport(AVFoundation)
+final class TimelineProgramPlayer: ObservableObject {
+    @Published var player: AVPlayer
+    @Published var hasContent: Bool = false
+
+    var onTimeUpdate: (@Sendable (TimeInterval) -> Void)?
+    var onPlaybackEnded: (@Sendable () -> Void)?
+
+    private var timeObserver: Any?
+    private var endObserver: NSObjectProtocol?
+    private var lastSignature: String = ""
+
+    init() {
+        let player = AVPlayer()
+        player.actionAtItemEnd = .pause
+        player.automaticallyWaitsToMinimizeStalling = true
+        self.player = player
+    }
+
+    deinit {
+        if let timeObserver {
+            player.removeTimeObserver(timeObserver)
+        }
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+        }
+    }
+
+    @MainActor
+    func rebuild(sequence: EditorSequence?, assets: [MediaAsset], fps: Double) {
+        guard let sequence else {
+            clear()
+            return
+        }
+
+        let videoClips = (sequence.videoTracks.first?.clips ?? []).sorted(by: { $0.timelineIn < $1.timelineIn })
+        guard !videoClips.isEmpty else {
+            clear()
+            return
+        }
+
+        let assetByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
+        let signature = TimelineProgramPlayer.signature(sequenceID: sequence.id, clips: videoClips, assetByID: assetByID)
+        if signature == lastSignature, player.currentItem != nil {
+            return
+        }
+
+        let composition = AVMutableComposition()
+        let compositionVideoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        )
+        let compositionAudioTrack = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        )
+
+        var insertedAny = false
+
+        for clip in videoClips {
+            guard let asset = assetByID[clip.assetID] else { continue }
+            let url = URL(fileURLWithPath: asset.path).standardizedFileURL
+            guard FileManager.default.fileExists(atPath: url.path()) else { continue }
+
+            let avAsset = AVAsset(url: url)
+            guard let sourceVideoTrack = avAsset.tracks(withMediaType: .video).first else { continue }
+
+            let clipStart = CMTime(seconds: max(0, clip.inTime), preferredTimescale: 600)
+            let clipDuration = CMTime(seconds: max(0, clip.duration), preferredTimescale: 600)
+            guard clipDuration > .zero else { continue }
+
+            let sourceRange = CMTimeRange(start: clipStart, duration: clipDuration)
+            let insertAt = CMTime(seconds: max(0, clip.timelineIn), preferredTimescale: 600)
+
+            do {
+                try compositionVideoTrack?.insertTimeRange(sourceRange, of: sourceVideoTrack, at: insertAt)
+                insertedAny = true
+            } catch {
+                continue
+            }
+
+            if let sourceAudioTrack = avAsset.tracks(withMediaType: .audio).first {
+                do {
+                    try compositionAudioTrack?.insertTimeRange(sourceRange, of: sourceAudioTrack, at: insertAt)
+                } catch {
+                    // Audio is optional for preview.
+                }
+            }
+        }
+
+        guard insertedAny else {
+            clear()
+            return
+        }
+
+        let item = AVPlayerItem(asset: composition)
+        item.audioTimePitchAlgorithm = .timeDomain
+
+        player.replaceCurrentItem(with: item)
+        attachObservers(fps: fps)
+        lastSignature = signature
+        hasContent = true
+    }
+
+    @MainActor
+    func seek(to seconds: TimeInterval) {
+        guard player.currentItem != nil else { return }
+        let time = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
+        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    @MainActor
+    func play(rate: Double) {
+        guard player.currentItem != nil else { return }
+        player.play()
+        player.rate = Float(min(4.0, max(0.25, rate)))
+    }
+
+    @MainActor
+    func pause() {
+        player.pause()
+    }
+
+    private func clear() {
+        player.replaceCurrentItem(with: nil)
+        hasContent = false
+        lastSignature = ""
+    }
+
+    @MainActor
+    private func attachObservers(fps: Double) {
+        if let timeObserver {
+            player.removeTimeObserver(timeObserver)
+            self.timeObserver = nil
+        }
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+            self.endObserver = nil
+        }
+
+        let requested = fps.isFinite ? fps : 30
+        let clampedFPS = Int(max(10, min(60, requested)))
+        let interval = CMTime(seconds: 1.0 / Double(clampedFPS), preferredTimescale: 600)
+
+        let timeHandler = onTimeUpdate
+        let endHandler = onPlaybackEnded
+
+        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+            let seconds = time.seconds
+            guard seconds.isFinite else { return }
+            timeHandler?(seconds)
+        }
+
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: player.currentItem,
+            queue: .main
+        ) { _ in
+            endHandler?()
+        }
+    }
+
+    private static func signature(
+        sequenceID: UUID,
+        clips: [ClipRef],
+        assetByID: [UUID: MediaAsset]
+    ) -> String {
+        var parts: [String] = [sequenceID.uuidString]
+        parts.reserveCapacity(1 + clips.count)
+        for clip in clips {
+            let path = assetByID[clip.assetID]?.path ?? "missing"
+            parts.append("\(clip.id.uuidString)|\(clip.assetID.uuidString)|\(clip.timelineIn)|\(clip.inTime)|\(clip.outTime)|\(path)")
+        }
+        return parts.joined(separator: ";")
+    }
+}
+
 private struct MediaViewerSurface: View {
     let asset: MediaAsset?
     let seekTime: TimeInterval?

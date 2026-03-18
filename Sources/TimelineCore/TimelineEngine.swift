@@ -7,6 +7,7 @@ public enum TimelineOperation: Sendable {
     case trimClip(sequenceID: UUID, trackID: UUID, trackKind: TrackKind, clipID: UUID, newIn: TimeInterval, newOut: TimeInterval)
     case rippleDelete(sequenceID: UUID, trackID: UUID, trackKind: TrackKind, clipID: UUID)
     case moveClip(sequenceID: UUID, trackID: UUID, trackKind: TrackKind, clipID: UUID, newTimelineIn: TimeInterval)
+    case slipClip(sequenceID: UUID, trackID: UUID, trackKind: TrackKind, clipID: UUID, deltaSource: TimeInterval)
     case changeMode(sequenceID: UUID, mode: TimelineMode)
 }
 
@@ -107,6 +108,32 @@ public struct TimelineEngine {
                 track.clips.sort { $0.timelineIn < $1.timelineIn }
             }
             return (project, TimelinePatch(summary: "Moved clip", affectedClipIDs: [clipID], resultingDuration: duration))
+
+        case .slipClip(let sequenceID, let trackID, let trackKind, let clipID, let deltaSource):
+            let projectAssets = project.assets
+            let duration = try updateTrack(project: &project, sequenceID: sequenceID, trackID: trackID, trackKind: trackKind) { track in
+                guard let clipIndex = track.clips.firstIndex(where: { $0.id == clipID }) else {
+                    throw TimelineEngineError.clipNotFound
+                }
+
+                let clip = track.clips[clipIndex]
+                let clipDuration = clip.duration
+                guard clipDuration > 0 else { throw TimelineEngineError.invalidTimeRange }
+
+                let assetDuration = projectAssets.first(where: { $0.id == clip.assetID })?.duration ?? (clip.outTime)
+                let maxIn = max(0, assetDuration - clipDuration)
+                let proposedIn = clip.inTime + deltaSource
+                let clampedIn = min(maxIn, max(0, proposedIn))
+                let clampedOut = clampedIn + clipDuration
+
+                guard clampedOut <= assetDuration + 0.0001 else {
+                    throw TimelineEngineError.invalidTimeRange
+                }
+
+                track.clips[clipIndex].inTime = clampedIn
+                track.clips[clipIndex].outTime = clampedOut
+            }
+            return (project, TimelinePatch(summary: "Slipped clip", affectedClipIDs: [clipID], resultingDuration: duration))
 
         case .changeMode(let sequenceID, let mode):
             let duration = try updateSequence(project: &project, sequenceID: sequenceID) { sequence in
