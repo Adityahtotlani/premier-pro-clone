@@ -8,6 +8,9 @@ public enum TimelineOperation: Sendable {
     case rippleDelete(sequenceID: UUID, trackID: UUID, trackKind: TrackKind, clipID: UUID)
     case moveClip(sequenceID: UUID, trackID: UUID, trackKind: TrackKind, clipID: UUID, newTimelineIn: TimeInterval)
     case slipClip(sequenceID: UUID, trackID: UUID, trackKind: TrackKind, clipID: UUID, deltaSource: TimeInterval)
+    // Slide keeps the selected clip duration intact but shifts its position while trimming
+    // the adjacent clips to preserve the two surrounding edit points (track-mode behavior).
+    case slideClip(sequenceID: UUID, trackID: UUID, trackKind: TrackKind, clipID: UUID, deltaTimeline: TimeInterval)
     case changeMode(sequenceID: UUID, mode: TimelineMode)
 }
 
@@ -48,6 +51,8 @@ public struct TimelineEngine {
 
     public func apply(operation: TimelineOperation, to project: Project) throws -> (Project, TimelinePatch) {
         var project = project
+        let minimumEditableDuration: TimeInterval = 0.2
+        let timeEpsilon: TimeInterval = 0.0001
 
         switch operation {
         case .insertClip(let sequenceID, let trackID, let trackKind, let clip):
@@ -134,6 +139,79 @@ public struct TimelineEngine {
                 track.clips[clipIndex].outTime = clampedOut
             }
             return (project, TimelinePatch(summary: "Slipped clip", affectedClipIDs: [clipID], resultingDuration: duration))
+
+        case .slideClip(let sequenceID, let trackID, let trackKind, let clipID, let deltaTimeline):
+            let projectAssets = project.assets
+            let duration = try updateTrack(project: &project, sequenceID: sequenceID, trackID: trackID, trackKind: trackKind) { track in
+                track.clips.sort { $0.timelineIn < $1.timelineIn }
+                guard let clipIndex = track.clips.firstIndex(where: { $0.id == clipID }) else {
+                    throw TimelineEngineError.clipNotFound
+                }
+                guard clipIndex > 0 && clipIndex < (track.clips.count - 1) else {
+                    throw TimelineEngineError.invalidTimeRange
+                }
+
+                let prevIndex = clipIndex - 1
+                let nextIndex = clipIndex + 1
+
+                let prev = track.clips[prevIndex]
+                let clip = track.clips[clipIndex]
+                let next = track.clips[nextIndex]
+
+                let prevDuration = prev.duration
+                let clipDuration = clip.duration
+                let nextDuration = next.duration
+
+                guard prevDuration >= minimumEditableDuration,
+                      clipDuration > 0,
+                      nextDuration >= minimumEditableDuration else {
+                    throw TimelineEngineError.invalidTimeRange
+                }
+
+                let prevEnd = prev.timelineIn + prevDuration
+                let clipStart = clip.timelineIn
+                let clipEnd = clip.timelineIn + clipDuration
+                let nextStart = next.timelineIn
+
+                // Keep this deterministic: only support slide at contiguous edit points.
+                guard abs(prevEnd - clipStart) <= timeEpsilon,
+                      abs(clipEnd - nextStart) <= timeEpsilon else {
+                    throw TimelineEngineError.invalidTimeRange
+                }
+
+                // Clamp delta so adjacent clips never shrink below the minimum duration, and source bounds are respected.
+                var minDelta = -(prevDuration - minimumEditableDuration)
+                var maxDelta = (nextDuration - minimumEditableDuration)
+
+                // Extending the next clip to the left consumes source headroom (inTime cannot go below 0).
+                minDelta = max(minDelta, -next.inTime)
+
+                // Extending the previous clip to the right consumes source tailroom if asset duration is known.
+                if let assetDuration = projectAssets.first(where: { $0.id == prev.assetID })?.duration {
+                    maxDelta = min(maxDelta, assetDuration - prev.outTime)
+                }
+
+                let clampedDelta = min(maxDelta, max(minDelta, deltaTimeline))
+                guard abs(clampedDelta) > timeEpsilon else {
+                    return
+                }
+
+                // Apply:
+                // - prev keeps its start, adjusts outTime
+                // - clip keeps in/out, adjusts timelineIn
+                // - next keeps its end (outTime), adjusts inTime and timelineIn
+                track.clips[prevIndex].outTime = prev.outTime + clampedDelta
+                track.clips[clipIndex].timelineIn = clip.timelineIn + clampedDelta
+                track.clips[nextIndex].timelineIn = next.timelineIn + clampedDelta
+                track.clips[nextIndex].inTime = next.inTime + clampedDelta
+
+                guard track.clips[prevIndex].outTime - track.clips[prevIndex].inTime >= minimumEditableDuration - timeEpsilon,
+                      track.clips[nextIndex].outTime - track.clips[nextIndex].inTime >= minimumEditableDuration - timeEpsilon else {
+                    throw TimelineEngineError.invalidTimeRange
+                }
+            }
+
+            return (project, TimelinePatch(summary: "Slid clip", affectedClipIDs: [clipID], resultingDuration: duration))
 
         case .changeMode(let sequenceID, let mode):
             let duration = try updateSequence(project: &project, sequenceID: sequenceID) { sequence in

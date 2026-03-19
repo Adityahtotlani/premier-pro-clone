@@ -358,7 +358,9 @@ public final class EditorWorkspace: ObservableObject {
     }
 
     public var canSlipSelectedClip: Bool {
-        guard let sequence = activeSequence, let selection = clipSelection else {
+        guard resolvedSelectedClipIDs().count == 1,
+              let sequence = activeSequence,
+              let selection = clipSelection else {
             return false
         }
         let targets = linkedEditTargets(
@@ -369,10 +371,49 @@ public final class EditorWorkspace: ObservableObject {
     }
 
     public var canTrimSelectedClip: Bool {
-        guard let selection = clipSelection else {
+        guard resolvedSelectedClipIDs().count == 1,
+              let sequence = activeSequence,
+              let selection = clipSelection else {
             return false
         }
-        return !isTrackLocked(selection.trackID)
+        let targets = linkedEditTargets(
+            for: (clip: selection.clip, trackID: selection.trackID, kind: selection.kind),
+            in: sequence
+        )
+        return !targets.isEmpty && !hasLockedTrack(in: targets)
+    }
+
+    public var canSlideSelectedClip: Bool {
+        guard resolvedSelectedClipIDs().count == 1,
+              let sequence = activeSequence,
+              sequence.mode == .track,
+              let selection = clipSelection else {
+            return false
+        }
+        let targets = linkedEditTargets(
+            for: (clip: selection.clip, trackID: selection.trackID, kind: selection.kind),
+            in: sequence
+        )
+        return !targets.isEmpty
+            && !hasLockedTrack(in: targets)
+            && targets.allSatisfy { slideOperationSupported(for: $0, in: sequence) }
+    }
+
+    public func canSlideClip(_ clipID: UUID) -> Bool {
+        guard let sequence = activeSequence, sequence.mode == .track else {
+            return false
+        }
+        let targets = clipTargets(for: [clipID], in: sequence)
+        guard let target = targets.first else {
+            return false
+        }
+        let linkedTargets = linkedEditTargets(
+            for: (clip: target.clip, trackID: target.trackID, kind: target.kind),
+            in: sequence
+        )
+        return !linkedTargets.isEmpty
+            && !hasLockedTrack(in: linkedTargets)
+            && linkedTargets.allSatisfy { slideOperationSupported(for: $0, in: sequence) }
     }
 
     public var exportSupportMessage: String {
@@ -1943,6 +1984,10 @@ public final class EditorWorkspace: ObservableObject {
     }
 
     public func slipSelectedClip(by seconds: TimeInterval) {
+        guard resolvedSelectedClipIDs().count == 1 else {
+            statusMessage = "Select a single clip first"
+            return
+        }
         guard let sequence = activeSequence, let selection = clipSelection else {
             statusMessage = "Select a clip first"
             return
@@ -1983,68 +2028,173 @@ public final class EditorWorkspace: ObservableObject {
     }
 
     public func trimSelectedClipLeading(by delta: TimeInterval) {
+        guard resolvedSelectedClipIDs().count == 1 else {
+            statusMessage = "Select a single clip first"
+            return
+        }
         guard let sequence = activeSequence, let selection = clipSelection else {
             statusMessage = "Select a clip first"
             return
         }
-        guard !isTrackLocked(selection.trackID) else {
+        let trimTargets = linkedEditTargets(
+            for: (clip: selection.clip, trackID: selection.trackID, kind: selection.kind),
+            in: sequence
+        )
+        guard !hasLockedTrack(in: trimTargets) else {
             statusMessage = "Track is locked"
             return
         }
+        let effectiveDelta = clampedLeadingTrimDelta(
+            requestedDelta: delta,
+            for: trimTargets,
+            in: sequence
+        )
+        guard abs(effectiveDelta) > 0.0001 else {
+            statusMessage = "Trim reached available limit"
+            return
+        }
         recordUndoSnapshot()
-
-        let maxStart = selection.clip.outTime - 0.2
-        let newIn = min(maxStart, max(0, selection.clip.inTime + delta))
+        var workingProject = project
 
         do {
-            let result = try timelineEngine.apply(
-                operation: .trimClip(
-                    sequenceID: sequence.id,
-                    trackID: selection.trackID,
-                    trackKind: selection.kind,
-                    clipID: selection.clip.id,
-                    newIn: newIn,
-                    newOut: selection.clip.outTime
-                ),
-                to: project
-            )
-            project = result.0
-            statusMessage = "Trimmed clip start"
+            for target in trimTargets {
+                guard let clip = clip(for: target, in: sequence) else { continue }
+                let result = try timelineEngine.apply(
+                    operation: .trimClip(
+                        sequenceID: sequence.id,
+                        trackID: target.trackID,
+                        trackKind: target.kind,
+                        clipID: target.clipID,
+                        newIn: clip.inTime + effectiveDelta,
+                        newOut: clip.outTime
+                    ),
+                    to: workingProject
+                )
+                workingProject = result.0
+                let moved = try timelineEngine.apply(
+                    operation: .moveClip(
+                        sequenceID: sequence.id,
+                        trackID: target.trackID,
+                        trackKind: target.kind,
+                        clipID: target.clipID,
+                        newTimelineIn: clip.timelineIn + effectiveDelta
+                    ),
+                    to: workingProject
+                )
+                workingProject = moved.0
+            }
+            project = workingProject
+            statusMessage = trimTargets.count > 1 ? "Trimmed linked clip start" : "Trimmed clip start"
         } catch {
             statusMessage = "Trim failed: \(error.localizedDescription)"
         }
     }
 
     public func trimSelectedClipTrailing(by delta: TimeInterval) {
+        guard resolvedSelectedClipIDs().count == 1 else {
+            statusMessage = "Select a single clip first"
+            return
+        }
         guard let sequence = activeSequence, let selection = clipSelection else {
             statusMessage = "Select a clip first"
             return
         }
-        guard !isTrackLocked(selection.trackID) else {
+        let trimTargets = linkedEditTargets(
+            for: (clip: selection.clip, trackID: selection.trackID, kind: selection.kind),
+            in: sequence
+        )
+        guard !hasLockedTrack(in: trimTargets) else {
             statusMessage = "Track is locked"
             return
         }
+        let effectiveDelta = clampedTrailingTrimDelta(
+            requestedDelta: delta,
+            for: trimTargets,
+            in: sequence
+        )
+        guard abs(effectiveDelta) > 0.0001 else {
+            statusMessage = "Trim reached available limit"
+            return
+        }
         recordUndoSnapshot()
-
-        let minEnd = selection.clip.inTime + 0.2
-        let newOut = max(minEnd, selection.clip.outTime + delta)
+        var workingProject = project
 
         do {
-            let result = try timelineEngine.apply(
-                operation: .trimClip(
-                    sequenceID: sequence.id,
-                    trackID: selection.trackID,
-                    trackKind: selection.kind,
-                    clipID: selection.clip.id,
-                    newIn: selection.clip.inTime,
-                    newOut: newOut
-                ),
-                to: project
-            )
-            project = result.0
-            statusMessage = "Trimmed clip end"
+            for target in trimTargets {
+                guard let clip = clip(for: target, in: sequence) else { continue }
+                let result = try timelineEngine.apply(
+                    operation: .trimClip(
+                        sequenceID: sequence.id,
+                        trackID: target.trackID,
+                        trackKind: target.kind,
+                        clipID: target.clipID,
+                        newIn: clip.inTime,
+                        newOut: clip.outTime + effectiveDelta
+                    ),
+                    to: workingProject
+                )
+                workingProject = result.0
+            }
+            project = workingProject
+            statusMessage = trimTargets.count > 1 ? "Trimmed linked clip end" : "Trimmed clip end"
         } catch {
             statusMessage = "Trim failed: \(error.localizedDescription)"
+        }
+    }
+
+    public func slideSelectedClip(by seconds: TimeInterval) {
+        guard resolvedSelectedClipIDs().count == 1 else {
+            statusMessage = "Select a single clip first"
+            return
+        }
+        guard let sequence = activeSequence, let selection = clipSelection else {
+            statusMessage = "Select a clip first"
+            return
+        }
+        guard sequence.mode == .track else {
+            statusMessage = "Slide is available in Track mode only"
+            return
+        }
+
+        let slideTargets = linkedEditTargets(
+            for: (clip: selection.clip, trackID: selection.trackID, kind: selection.kind),
+            in: sequence
+        )
+        guard !hasLockedTrack(in: slideTargets) else {
+            statusMessage = "Track is locked"
+            return
+        }
+        guard slideTargets.allSatisfy({ slideOperationSupported(for: $0, in: sequence) }) else {
+            statusMessage = "Slide needs clips on both sides"
+            return
+        }
+
+        recordUndoSnapshot()
+        var workingProject = project
+
+        do {
+            for target in slideTargets {
+                let result = try timelineEngine.apply(
+                    operation: .slideClip(
+                        sequenceID: sequence.id,
+                        trackID: target.trackID,
+                        trackKind: target.kind,
+                        clipID: target.clipID,
+                        deltaTimeline: seconds
+                    ),
+                    to: workingProject
+                )
+                workingProject = result.0
+            }
+            project = workingProject
+            let deltaText = String(format: "%+.1fs", seconds)
+            statusMessage = slideTargets.count > 1
+                ? "Slid linked clips by \(deltaText)"
+                : "Slid clip by \(deltaText)"
+        } catch TimelineEngineError.invalidTimeRange {
+            statusMessage = "Slide reached available limit"
+        } catch {
+            statusMessage = "Slide failed: \(error.localizedDescription)"
         }
     }
 
@@ -2706,6 +2856,95 @@ public final class EditorWorkspace: ObservableObject {
 
     private func hasLockedTrack(in targets: [ClipEditTarget]) -> Bool {
         targets.contains(where: { isTrackLocked($0.trackID) })
+    }
+
+    private var minimumEditableClipDuration: TimeInterval {
+        max(0.2, 1.0 / max(1, project.fps))
+    }
+
+    private func clip(for target: ClipEditTarget, in sequence: EditorSequence) -> ClipRef? {
+        switch target.kind {
+        case .video:
+            return sequence.videoTracks
+                .first(where: { $0.id == target.trackID })?
+                .clips.first(where: { $0.id == target.clipID })
+        case .audio:
+            return sequence.audioTracks
+                .first(where: { $0.id == target.trackID })?
+                .clips.first(where: { $0.id == target.clipID })
+        }
+    }
+
+    private func clampedLeadingTrimDelta(
+        requestedDelta: TimeInterval,
+        for targets: [ClipEditTarget],
+        in sequence: EditorSequence
+    ) -> TimeInterval {
+        guard !targets.isEmpty else { return 0 }
+        let clips = targets.compactMap { clip(for: $0, in: sequence) }
+        guard !clips.isEmpty else { return 0 }
+
+        if requestedDelta >= 0 {
+            let maxPositive = clips.map { max(0, $0.duration - minimumEditableClipDuration) }.min() ?? 0
+            return min(requestedDelta, maxPositive)
+        }
+
+        let maxExtension = clips.map { min($0.inTime, $0.timelineIn) }.min() ?? 0
+        return max(requestedDelta, -maxExtension)
+    }
+
+    private func clampedTrailingTrimDelta(
+        requestedDelta: TimeInterval,
+        for targets: [ClipEditTarget],
+        in sequence: EditorSequence
+    ) -> TimeInterval {
+        guard !targets.isEmpty else { return 0 }
+        let clips = targets.compactMap { clip(for: $0, in: sequence) }
+        guard !clips.isEmpty else { return 0 }
+
+        if requestedDelta <= 0 {
+            let maxNegative = clips.map { max(0, $0.duration - minimumEditableClipDuration) }.min() ?? 0
+            return max(requestedDelta, -maxNegative)
+        }
+
+        let maxExtension = clips.map { clip in
+            let asset = project.assets.first(where: { $0.id == clip.assetID })
+            let assetDuration = sourceDuration(for: asset)
+            return max(0, assetDuration - clip.outTime)
+        }.min() ?? 0
+        return min(requestedDelta, maxExtension)
+    }
+
+    private func slideOperationSupported(
+        for target: ClipEditTarget,
+        in sequence: EditorSequence
+    ) -> Bool {
+        let clips: [ClipRef]
+        switch target.kind {
+        case .video:
+            clips = sequence.videoTracks
+                .first(where: { $0.id == target.trackID })?
+                .clips.sorted(by: { $0.timelineIn < $1.timelineIn }) ?? []
+        case .audio:
+            clips = sequence.audioTracks
+                .first(where: { $0.id == target.trackID })?
+                .clips.sorted(by: { $0.timelineIn < $1.timelineIn }) ?? []
+        }
+
+        guard let index = clips.firstIndex(where: { $0.id == target.clipID }),
+              index > 0,
+              index < clips.count - 1 else {
+            return false
+        }
+
+        let previous = clips[index - 1]
+        let current = clips[index]
+        let next = clips[index + 1]
+        let epsilon = 0.0001
+        let previousEnd = previous.timelineIn + previous.duration
+        let currentEnd = current.timelineIn + current.duration
+        return abs(previousEnd - current.timelineIn) <= epsilon
+            && abs(currentEnd - next.timelineIn) <= epsilon
     }
 
     private func shiftClipsForMagneticInsert(
@@ -3508,6 +3747,7 @@ public struct EditorRootView: View {
     #if canImport(AVKit) && canImport(AVFoundation)
     @StateObject private var programPlayer = TimelineProgramPlayer()
     #endif
+    @AppStorage("timelineSnappingEnabled") private var isTimelineSnappingEnabled = true
     @State private var workspaceStage: WorkspaceStage = .home
     @State private var browserTab: BrowserTab = .libraries
     @State private var inspectorTab: InspectorTab = .video
@@ -3532,6 +3772,8 @@ public struct EditorRootView: View {
     @State private var draggingClipID: UUID?
     @State private var dragTranslationX: CGFloat = 0
     @State private var isGroupDragging = false
+    @State private var activeSnapPreview: SnapPreview?
+    @State private var activeTrimPreview: TrimPreview?
     @State private var marqueeTrackID: UUID?
     @State private var marqueeTrackKind: TrackKind?
     @State private var marqueeStartX: CGFloat?
@@ -3628,6 +3870,26 @@ public struct EditorRootView: View {
     private enum SidePanelKind {
         case browser
         case inspector
+    }
+
+    private enum TrimEdge: Equatable {
+        case leading
+        case trailing
+    }
+
+    private struct SnapPreview: Equatable {
+        var time: TimeInterval
+        var label: String
+        var priority: Int
+    }
+
+    private struct TrimPreview: Equatable {
+        var clipID: UUID
+        var edge: TrimEdge
+        var delta: TimeInterval
+        var proposedTimelineIn: TimeInterval
+        var proposedDuration: TimeInterval
+        var label: String
     }
 
     private var activeSequence: EditorSequence? {
@@ -4101,10 +4363,15 @@ public struct EditorRootView: View {
             restoreWorkspaceLayoutFromProject()
         }
         .onChange(of: workspace.activeSequenceID) { _ in
+            clearTimelineInteractionPreviews()
             rebuildProgramPlayer()
         }
         .onChange(of: workspace.project.sequences) { _ in
+            clearTimelineInteractionPreviews()
             rebuildProgramPlayer()
+        }
+        .onChange(of: workspace.selectedClipIDs) { _ in
+            clearTimelineInteractionPreviews()
         }
         .onChange(of: workspace.project.bins.map(\.id)) { _ in
             ensureSelectedBrowserBin()
@@ -5818,6 +6085,12 @@ public struct EditorRootView: View {
                     toolbarButton("Trim Out", systemImage: "arrow.left.to.line.compact") { workspace.trimSelectedClipTrailing(by: 0.1) }
                         .disabled(!workspace.canTrimSelectedClip)
                         .help("Trim the selected clip end by 0.1 seconds.")
+                    toolbarButton("Slide -", systemImage: "arrow.left.and.right") { workspace.slideSelectedClip(by: -0.1) }
+                        .disabled(!workspace.canSlideSelectedClip)
+                        .help("Slide the selected clip backward by 0.1 seconds while trimming adjacent clips.")
+                    toolbarButton("Slide +", systemImage: "arrow.left.and.right") { workspace.slideSelectedClip(by: 0.1) }
+                        .disabled(!workspace.canSlideSelectedClip)
+                        .help("Slide the selected clip forward by 0.1 seconds while trimming adjacent clips.")
                     toolbarButton("Slip -", systemImage: "arrow.left.and.line.vertical.and.arrow.right") { workspace.slipSelectedClip(by: -0.1) }
                         .disabled(!workspace.canSlipSelectedClip)
                         .help("Slip selected clip content backward by 0.1 seconds.")
@@ -6206,6 +6479,24 @@ public struct EditorRootView: View {
                     Text("Edit \(workspace.timelineEditMode.rawValue.capitalized)")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(workspace.timelineEditMode == .overwrite ? .orange : .secondary)
+                    Button {
+                        isTimelineSnappingEnabled.toggle()
+                        clearTimelineInteractionPreviews()
+                    } label: {
+                        Label(
+                            isTimelineSnappingEnabled ? "Snap On" : "Snap Off",
+                            systemImage: "magnet"
+                        )
+                        .font(.caption2.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(isTimelineSnappingEnabled ? Color(red: 0.31, green: 0.84, blue: 0.88) : Color.gray.opacity(0.7))
+                    .help("Align dragged clips and trims to nearby edit points.")
+                    if let snap = activeSnapPreview {
+                        Text("Snap: \(snap.label)")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Color(red: 0.31, green: 0.84, blue: 0.88))
+                    }
                     if let range = workspace.playbackRange {
                         Text("Range \(workspace.timecode(range.start)) - \(workspace.timecode(range.end))")
                             .font(.caption2.monospacedDigit())
@@ -6337,6 +6628,20 @@ public struct EditorRootView: View {
         max(4, (captionLaneHeight - captionClipHeight) / 2)
     }
 
+    private var snapGuideColor: Color {
+        Color(red: 0.31, green: 0.84, blue: 0.88)
+    }
+
+    @ViewBuilder
+    private func snapGuide(height: CGFloat) -> some View {
+        if let snap = activeSnapPreview {
+            Rectangle()
+                .fill(snapGuideColor.opacity(0.95))
+                .frame(width: 2, height: height)
+                .offset(x: xPosition(for: snap.time))
+        }
+    }
+
     private var timelineRuler: some View {
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 4)
@@ -6380,6 +6685,8 @@ public struct EditorRootView: View {
                     .frame(width: 2, height: 24)
                     .offset(x: xPosition(for: range.end))
             }
+
+            snapGuide(height: 24)
 
             Rectangle()
                 .fill(Color.white.opacity(0.9))
@@ -6530,6 +6837,8 @@ public struct EditorRootView: View {
                         .offset(x: xPosition(for: marker.time))
                 }
 
+                snapGuide(height: normalizedTrackLaneHeight)
+
                 if marqueeTrackID == track.id,
                    let rect = marqueeRect(trackHeight: normalizedTrackLaneHeight) {
                     RoundedRectangle(cornerRadius: 4)
@@ -6544,132 +6853,7 @@ public struct EditorRootView: View {
 
                 ForEach(sortedClips) { clip in
                     let isSelected = workspace.selectedClipIDs.contains(clip.id)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(assetName(for: clip))
-                            .font(.caption2.weight(.semibold))
-                            .lineLimit(1)
-                        Text("\(workspace.timecode(clip.timelineIn))  +\(workspace.timecode(clip.duration))")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.white.opacity(0.75))
-                            .lineLimit(1)
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .frame(width: clipWidth(for: clip.duration), height: trackClipHeight, alignment: .leading)
-                    .background(clipFillColor(for: clip, baseTint: tint))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(
-                                workspace.selectedClipIDs.contains(clip.id) ? Color.white : Color.clear,
-                                lineWidth: 1.6
-                            )
-                    )
-                    .overlay(alignment: .leading) {
-                        if !isLocked {
-                            RoundedRectangle(cornerRadius: 2)
-                                .fill(Color.white.opacity(0.55))
-                                .frame(width: 4, height: max(16, trackClipHeight - 10))
-                                .padding(.leading, 2)
-                                .gesture(
-                                    DragGesture(minimumDistance: 1)
-                                        .onEnded { gesture in
-                                            workspace.selectClip(clip.id)
-                                            let delta = snappedTimelineDelta(for: gesture.translation.width)
-                                            workspace.trimSelectedClipLeading(by: delta)
-                                        }
-                                )
-                        }
-                    }
-                    .overlay(alignment: .trailing) {
-                        if !isLocked {
-                            RoundedRectangle(cornerRadius: 2)
-                                .fill(Color.white.opacity(0.55))
-                                .frame(width: 4, height: max(16, trackClipHeight - 10))
-                                .padding(.trailing, 2)
-                                .gesture(
-                                    DragGesture(minimumDistance: 1)
-                                        .onEnded { gesture in
-                                            workspace.selectClip(clip.id)
-                                            let delta = snappedTimelineDelta(for: gesture.translation.width)
-                                            workspace.trimSelectedClipTrailing(by: delta)
-                                        }
-                                )
-                        }
-                    }
-                    .offset(
-                        x: xPosition(for: clip.timelineIn) + (
-                            (isGroupDragging && isSelected) || draggingClipID == clip.id ? dragTranslationX : 0
-                        ),
-                        y: trackClipVerticalInset
-                    )
-                    .onTapGesture {
-                        workspace.selectClip(clip.id)
-                    }
-                    .contextMenu {
-                        Button("Split At Playhead") {
-                            workspace.selectClip(clip.id)
-                            workspace.splitSelectedClipAtPlayhead()
-                        }
-                        Divider()
-                        Button("Nudge Left") {
-                            workspace.selectClip(clip.id)
-                            workspace.nudgeSelectedClip(by: -0.5)
-                        }
-                        Button("Nudge Right") {
-                            workspace.selectClip(clip.id)
-                            workspace.nudgeSelectedClip(by: 0.5)
-                        }
-                        Divider()
-                        Button("Trim Start +0.1s") {
-                            workspace.selectClip(clip.id)
-                            workspace.trimSelectedClipLeading(by: 0.1)
-                        }
-                        .disabled(isLocked)
-                        Button("Trim End +0.1s") {
-                            workspace.selectClip(clip.id)
-                            workspace.trimSelectedClipTrailing(by: 0.1)
-                        }
-                        .disabled(isLocked)
-                        Divider()
-                        Button("Ripple Delete", role: .destructive) {
-                            workspace.selectClip(clip.id)
-                            workspace.rippleDeleteSelectedClip()
-                        }
-                    }
-                    .highPriorityGesture(
-                        DragGesture(minimumDistance: 3)
-                            .onChanged { gesture in
-                                guard !isLocked else { return }
-                                if isSelected {
-                                    workspace.selectClips(Array(workspace.selectedClipIDs), primary: clip.id)
-                                } else {
-                                    workspace.selectClip(clip.id)
-                                }
-                                draggingClipID = clip.id
-                                dragTranslationX = gesture.translation.width
-                                isGroupDragging = workspace.selectedClipIDs.count > 1
-                            }
-                            .onEnded { gesture in
-                                guard !isLocked else {
-                                    draggingClipID = nil
-                                    dragTranslationX = 0
-                                    isGroupDragging = false
-                                    return
-                                }
-                                let seconds = snappedTimelineDelta(for: gesture.translation.width)
-                                if isGroupDragging {
-                                    workspace.nudgeSelectedClips(by: seconds)
-                                } else {
-                                    workspace.selectClip(clip.id)
-                                    workspace.nudgeSelectedClip(by: seconds)
-                                }
-                                draggingClipID = nil
-                                dragTranslationX = 0
-                                isGroupDragging = false
-                            }
-                    )
+                    timelineClipView(clip: clip, tint: tint, isLocked: isLocked, isSelected: isSelected)
                 }
 
                 if isLocked {
@@ -6706,6 +6890,184 @@ public struct EditorRootView: View {
                 return true
             }
         )
+    }
+
+    private func timelineClipView(
+        clip: ClipRef,
+        tint: Color,
+        isLocked: Bool,
+        isSelected: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(assetName(for: clip))
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+            Text("\(workspace.timecode(clip.timelineIn))  +\(workspace.timecode(clip.duration))")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.white.opacity(0.75))
+                .lineLimit(1)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(width: clipWidth(for: clip.duration), height: trackClipHeight, alignment: .leading)
+        .background(clipFillColor(for: clip, baseTint: tint))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isSelected ? Color.white : Color.clear, lineWidth: 1.6)
+        )
+        .overlay {
+            if let preview = activeTrimPreview, preview.clipID == clip.id {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(
+                        snapGuideColor.opacity(0.95),
+                        style: StrokeStyle(lineWidth: 1.4, dash: [5, 3])
+                    )
+                    .frame(width: clipWidth(for: preview.proposedDuration), height: trackClipHeight)
+                    .offset(x: xPosition(for: preview.proposedTimelineIn) - xPosition(for: clip.timelineIn))
+            }
+        }
+        .overlay(alignment: .top) {
+            if let preview = activeTrimPreview, preview.clipID == clip.id {
+                Text(preview.label)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.78))
+                    .clipShape(Capsule())
+                    .offset(y: -22)
+            }
+        }
+        .overlay(alignment: .leading) {
+            if !isLocked {
+                trimHandle(for: clip, edge: .leading)
+                    .padding(.leading, 2)
+            }
+        }
+        .overlay(alignment: .trailing) {
+            if !isLocked {
+                trimHandle(for: clip, edge: .trailing)
+                    .padding(.trailing, 2)
+            }
+        }
+        .offset(
+            x: xPosition(for: clip.timelineIn) + (
+                (isGroupDragging && isSelected) || draggingClipID == clip.id ? dragTranslationX : 0
+            ),
+            y: trackClipVerticalInset
+        )
+        .onTapGesture {
+            workspace.selectClip(clip.id)
+        }
+        .contextMenu {
+            Button("Split At Playhead") {
+                workspace.selectClip(clip.id)
+                workspace.splitSelectedClipAtPlayhead()
+            }
+            Divider()
+            Button("Nudge Left") {
+                workspace.selectClip(clip.id)
+                workspace.nudgeSelectedClip(by: -0.5)
+            }
+            Button("Nudge Right") {
+                workspace.selectClip(clip.id)
+                workspace.nudgeSelectedClip(by: 0.5)
+            }
+            Divider()
+            Button("Trim Start +0.1s") {
+                workspace.selectClip(clip.id)
+                workspace.trimSelectedClipLeading(by: 0.1)
+            }
+            .disabled(isLocked)
+            Button("Trim End +0.1s") {
+                workspace.selectClip(clip.id)
+                workspace.trimSelectedClipTrailing(by: 0.1)
+            }
+            .disabled(isLocked)
+            Button("Slide Left") {
+                workspace.selectClip(clip.id)
+                workspace.slideSelectedClip(by: -0.1)
+            }
+            .disabled(!workspace.canSlideClip(clip.id))
+            Button("Slide Right") {
+                workspace.selectClip(clip.id)
+                workspace.slideSelectedClip(by: 0.1)
+            }
+            .disabled(!workspace.canSlideClip(clip.id))
+            Divider()
+            Button("Ripple Delete", role: .destructive) {
+                workspace.selectClip(clip.id)
+                workspace.rippleDeleteSelectedClip()
+            }
+        }
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 3)
+                .onChanged { gesture in
+                    guard !isLocked else { return }
+                    if isSelected {
+                        workspace.selectClips(Array(workspace.selectedClipIDs), primary: clip.id)
+                    } else {
+                        workspace.selectClip(clip.id)
+                    }
+                    draggingClipID = clip.id
+                    let preview = movePreview(for: clip, translationX: gesture.translation.width)
+                    dragTranslationX = preview.translationX
+                    activeSnapPreview = preview.snap
+                    isGroupDragging = workspace.selectedClipIDs.count > 1
+                }
+                .onEnded { gesture in
+                    guard !isLocked else {
+                        draggingClipID = nil
+                        dragTranslationX = 0
+                        isGroupDragging = false
+                        clearTimelineInteractionPreviews()
+                        return
+                    }
+                    let delta = movePreview(for: clip, translationX: gesture.translation.width).delta
+                    if isGroupDragging {
+                        workspace.nudgeSelectedClips(by: delta)
+                    } else {
+                        workspace.selectClip(clip.id)
+                        workspace.nudgeSelectedClip(by: delta)
+                    }
+                    draggingClipID = nil
+                    dragTranslationX = 0
+                    isGroupDragging = false
+                    clearTimelineInteractionPreviews()
+                }
+        )
+    }
+
+    private func trimHandle(for clip: ClipRef, edge: TrimEdge) -> some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(
+                activeTrimPreview?.clipID == clip.id && activeTrimPreview?.edge == edge ?
+                snapGuideColor.opacity(0.9) :
+                Color.white.opacity(0.55)
+            )
+            .frame(width: 4, height: max(16, trackClipHeight - 10))
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { gesture in
+                        workspace.selectClip(clip.id)
+                        let preview = trimPreview(for: clip, edge: edge, translationX: gesture.translation.width)
+                        activeTrimPreview = preview
+                        activeSnapPreview = preview.flatMap { previewSnap(for: $0) }
+                    }
+                    .onEnded { gesture in
+                        workspace.selectClip(clip.id)
+                        let delta = trimPreview(for: clip, edge: edge, translationX: gesture.translation.width)?.delta
+                            ?? snappedTimelineDelta(for: gesture.translation.width)
+                        if edge == .leading {
+                            workspace.trimSelectedClipLeading(by: delta)
+                        } else {
+                            workspace.trimSelectedClipTrailing(by: delta)
+                        }
+                        clearTimelineInteractionPreviews()
+                    }
+            )
     }
 
     private func isTrackTargeted(trackID: UUID, kind: TrackKind) -> Bool {
@@ -6751,6 +7113,8 @@ public struct EditorRootView: View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(Color.white.opacity(0.04))
                 .frame(width: timelineCanvasWidth, height: captionLaneHeight)
+
+            snapGuide(height: captionLaneHeight)
 
             ForEach(captionSegments) { segment in
                 Text(segment.text)
@@ -6836,11 +7200,179 @@ public struct EditorRootView: View {
         lastMarqueeSelectionAt = Date()
     }
 
+    private func clearTimelineInteractionPreviews() {
+        activeSnapPreview = nil
+        activeTrimPreview = nil
+    }
+
+    private func timelineFrameDuration() -> TimeInterval {
+        1.0 / max(1, workspace.project.fps)
+    }
+
+    private func quantizedTimelineTime(_ time: TimeInterval) -> TimeInterval {
+        let frameDuration = timelineFrameDuration()
+        guard frameDuration > 0 else { return max(0, time) }
+        return max(0, (time / frameDuration).rounded() * frameDuration)
+    }
+
+    private func quantizedTimelineDelta(_ delta: TimeInterval) -> TimeInterval {
+        let frameDuration = timelineFrameDuration()
+        guard frameDuration > 0 else { return delta }
+        return (delta / frameDuration).rounded() * frameDuration
+    }
+
     private func snappedTimelineDelta(for translationX: CGFloat) -> TimeInterval {
         guard timelinePixelsPerSecond > 0 else { return 0 }
         let rawSeconds = TimeInterval(translationX / timelinePixelsPerSecond)
-        let frameDuration = 1.0 / max(1, workspace.project.fps)
-        return (rawSeconds / frameDuration).rounded() * frameDuration
+        return quantizedTimelineDelta(rawSeconds)
+    }
+
+    private func timelineSnapTargets(excludingClipIDs: Set<UUID>) -> [SnapPreview] {
+        var targets: [SnapPreview] = [
+            SnapPreview(time: workspace.playheadTime, label: "Playhead", priority: 0)
+        ]
+
+        if let range = workspace.playbackRange {
+            targets.append(SnapPreview(time: range.start, label: "Range Start", priority: 3))
+            targets.append(SnapPreview(time: range.end, label: "Range End", priority: 3))
+        }
+
+        if let sequence = activeSequence {
+            targets.append(contentsOf: sequence.markers.map {
+                SnapPreview(time: $0.time, label: "Marker", priority: 2)
+            })
+        }
+
+        let clips = (videoClips + audioClips).filter { !excludingClipIDs.contains($0.id) }
+        for clip in clips {
+            targets.append(SnapPreview(time: clip.timelineIn, label: "Clip Start", priority: 1))
+            targets.append(SnapPreview(time: clip.timelineIn + clip.duration, label: "Clip End", priority: 1))
+        }
+
+        return targets
+    }
+
+    private func resolveTimelineSnap(
+        for proposedTime: TimeInterval,
+        excludingClipIDs: Set<UUID> = []
+    ) -> SnapPreview? {
+        guard isTimelineSnappingEnabled else { return nil }
+        let thresholdSeconds = max(timelineFrameDuration() * 2, TimeInterval(12 / max(1, timelinePixelsPerSecond)))
+        let quantizedTime = quantizedTimelineTime(proposedTime)
+        return timelineSnapTargets(excludingClipIDs: excludingClipIDs)
+            .filter { abs($0.time - quantizedTime) <= thresholdSeconds }
+            .sorted {
+                let lhsDistance = abs($0.time - quantizedTime)
+                let rhsDistance = abs($1.time - quantizedTime)
+                if abs(lhsDistance - rhsDistance) > 0.0001 {
+                    return lhsDistance < rhsDistance
+                }
+                if $0.priority != $1.priority {
+                    return $0.priority < $1.priority
+                }
+                return $0.time < $1.time
+            }
+            .first
+    }
+
+    private func movePreview(
+        for clip: ClipRef,
+        translationX: CGFloat
+    ) -> (delta: TimeInterval, translationX: CGFloat, snap: SnapPreview?) {
+        let rawDelta = snappedTimelineDelta(for: translationX)
+        guard isTimelineSnappingEnabled else {
+            return (rawDelta, CGFloat(rawDelta) * timelinePixelsPerSecond, nil)
+        }
+
+        let excludedIDs = workspace.selectedClipIDs.isEmpty ? [clip.id] : workspace.selectedClipIDs
+        let proposedStart = clip.timelineIn + rawDelta
+        let proposedEnd = proposedStart + clip.duration
+
+        let startSnap = resolveTimelineSnap(for: proposedStart, excludingClipIDs: excludedIDs)
+        let endSnap = resolveTimelineSnap(for: proposedEnd, excludingClipIDs: excludedIDs)
+
+        let candidateDeltas: [(delta: TimeInterval, snap: SnapPreview)] = [
+            startSnap.map { ($0.time - clip.timelineIn, $0) },
+            endSnap.map { ($0.time - (clip.timelineIn + clip.duration), $0) }
+        ].compactMap { $0 }
+
+        guard let best = candidateDeltas.sorted(by: {
+            let lhsDistance = abs($0.delta - rawDelta)
+            let rhsDistance = abs($1.delta - rawDelta)
+            if abs(lhsDistance - rhsDistance) > 0.0001 {
+                return lhsDistance < rhsDistance
+            }
+            if $0.snap.priority != $1.snap.priority {
+                return $0.snap.priority < $1.snap.priority
+            }
+            return $0.snap.time < $1.snap.time
+        }).first else {
+            return (rawDelta, CGFloat(rawDelta) * timelinePixelsPerSecond, nil)
+        }
+
+        return (best.delta, CGFloat(best.delta) * timelinePixelsPerSecond, best.snap)
+    }
+
+    private func trimPreview(
+        for clip: ClipRef,
+        edge: TrimEdge,
+        translationX: CGFloat
+    ) -> TrimPreview? {
+        let rawDelta = snappedTimelineDelta(for: translationX)
+        let excludedIDs: Set<UUID> = [clip.id]
+        let minimumDuration = max(0.2, timelineFrameDuration())
+
+        switch edge {
+        case .leading:
+            let proposedStart = clip.timelineIn + rawDelta
+            let snap = resolveTimelineSnap(for: proposedStart, excludingClipIDs: excludedIDs)
+            let snappedDelta = snap.map { $0.time - clip.timelineIn } ?? rawDelta
+            let clampedDelta = max(
+                -min(clip.inTime, clip.timelineIn),
+                min(snappedDelta, clip.duration - minimumDuration)
+            )
+            let previewDuration = max(minimumDuration, clip.duration - clampedDelta)
+            return TrimPreview(
+                clipID: clip.id,
+                edge: edge,
+                delta: clampedDelta,
+                proposedTimelineIn: clip.timelineIn + clampedDelta,
+                proposedDuration: previewDuration,
+                label: "Trim In \(String(format: "%+.1fs", clampedDelta)) • Dur \(workspace.timecode(previewDuration))"
+            )
+
+        case .trailing:
+            let proposedEnd = clip.timelineIn + clip.duration + rawDelta
+            let snap = resolveTimelineSnap(for: proposedEnd, excludingClipIDs: excludedIDs)
+            let snappedDelta = snap.map { $0.time - (clip.timelineIn + clip.duration) } ?? rawDelta
+            let asset = workspace.project.assets.first(where: { $0.id == clip.assetID })
+            let assetDuration = max(minimumDuration, asset?.duration ?? clip.outTime)
+            let clampedDelta = min(
+                max(snappedDelta, -(clip.duration - minimumDuration)),
+                max(0, assetDuration - clip.outTime)
+            )
+            let previewDuration = max(minimumDuration, clip.duration + clampedDelta)
+            return TrimPreview(
+                clipID: clip.id,
+                edge: edge,
+                delta: clampedDelta,
+                proposedTimelineIn: clip.timelineIn,
+                proposedDuration: previewDuration,
+                label: "Trim Out \(String(format: "%+.1fs", clampedDelta)) • Dur \(workspace.timecode(previewDuration))"
+            )
+        }
+    }
+
+    private func previewSnap(for preview: TrimPreview) -> SnapPreview? {
+        switch preview.edge {
+        case .leading:
+            return resolveTimelineSnap(for: preview.proposedTimelineIn, excludingClipIDs: [preview.clipID])
+        case .trailing:
+            return resolveTimelineSnap(
+                for: preview.proposedTimelineIn + preview.proposedDuration,
+                excludingClipIDs: [preview.clipID]
+            )
+        }
     }
 
     private func assetName(for clip: ClipRef) -> String {
@@ -7532,6 +8064,8 @@ public struct EditorRootView: View {
             Text("Cmd+Opt+Shift+V / A  Add Video/Audio Track")
             Text("Drag Browser clip onto Timeline to insert at drop point")
             Text("Drag clip edges in timeline lanes to trim In/Out")
+            Text("Use Slide +/- on a middle clip in Track mode to adjust surrounding edits")
+            Text("Timeline header: toggle Snap On/Off for edit-point alignment")
             Text("Libraries tab: drag clips onto bins to organize media")
             Text("Missing media banner: use Relink First Missing to restore previews")
             Text("Use Event Viewer In/Out + Insert for subclip editing")

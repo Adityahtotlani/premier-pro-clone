@@ -225,6 +225,73 @@ final class AppShellTests: XCTestCase {
         XCTAssertFalse(workspace.canTrimSelectedClip)
     }
 
+    func testCanTrimSelectedClipIsFalseForMultiSelection() {
+        var project = ProjectFactory.starterProject(name: "TrimMultiSelection")
+        project.assets = [MediaAsset(name: "Clip", path: "/tmp/trim-multi.mp4", type: .video, duration: 4)]
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.appendFirstAssetToTimeline()
+        workspace.updatePlayhead(to: 4.0)
+        workspace.appendFirstAssetToTimeline()
+
+        let clipIDs = Set(workspace.activeSequence?.videoTracks.first?.clips.map(\.id) ?? [])
+        workspace.selectClips(Array(clipIDs), primary: clipIDs.first)
+
+        XCTAssertFalse(workspace.canTrimSelectedClip)
+        XCTAssertFalse(workspace.canSlipSelectedClip)
+    }
+
+    func testSlideSelectedVideoSlidesLinkedAudioAndNeighbors() {
+        let asset = MediaAsset(name: "Clip", path: "/tmp/slide.mp4", type: .video, duration: 20)
+
+        let videoLeft = ClipRef(assetID: asset.id, inTime: 0, outTime: 5, timelineIn: 0, linkedAudioIDs: [])
+        let videoMiddleID = UUID()
+        let audioMiddleID = UUID()
+        let videoMiddle = ClipRef(
+            id: videoMiddleID,
+            assetID: asset.id,
+            inTime: 5,
+            outTime: 8,
+            timelineIn: 5,
+            linkedAudioIDs: [audioMiddleID]
+        )
+        let videoRight = ClipRef(assetID: asset.id, inTime: 8, outTime: 12, timelineIn: 8, linkedAudioIDs: [])
+
+        let audioLeft = ClipRef(assetID: asset.id, inTime: 0, outTime: 5, timelineIn: 0, linkedAudioIDs: [])
+        let audioMiddle = ClipRef(
+            id: audioMiddleID,
+            assetID: asset.id,
+            inTime: 5,
+            outTime: 8,
+            timelineIn: 5,
+            linkedAudioIDs: [videoMiddleID]
+        )
+        let audioRight = ClipRef(assetID: asset.id, inTime: 8, outTime: 12, timelineIn: 8, linkedAudioIDs: [])
+
+        let sequence = EditorSequence(
+            name: "Main",
+            mode: .track,
+            videoTracks: [TimelineTrack(name: "V1", kind: .video, clips: [videoLeft, videoMiddle, videoRight])],
+            audioTracks: [TimelineTrack(name: "A1", kind: .audio, clips: [audioLeft, audioMiddle, audioRight])]
+        )
+        let project = Project(name: "Slide", fps: 30, sequences: [sequence], assets: [asset], bins: [])
+
+        let workspace = EditorWorkspace(project: project)
+        workspace.selectClip(videoMiddleID)
+        XCTAssertTrue(workspace.canSlideSelectedClip)
+
+        workspace.slideSelectedClip(by: 1.0)
+
+        let videoTrack = workspace.activeSequence?.videoTracks.first?.clips ?? []
+        let audioTrack = workspace.activeSequence?.audioTracks.first?.clips ?? []
+        XCTAssertEqual(videoTrack[0].outTime, 6.0, accuracy: 0.0001)
+        XCTAssertEqual(videoTrack[1].timelineIn, 6.0, accuracy: 0.0001)
+        XCTAssertEqual(videoTrack[2].timelineIn, 9.0, accuracy: 0.0001)
+        XCTAssertEqual(audioTrack[0].outTime, 6.0, accuracy: 0.0001)
+        XCTAssertEqual(audioTrack[1].timelineIn, 6.0, accuracy: 0.0001)
+        XCTAssertEqual(audioTrack[2].timelineIn, 9.0, accuracy: 0.0001)
+    }
+
     func testMagneticInsertShiftsExistingTimeline() {
         var project = ProjectFactory.starterProject(name: "MagneticInsert")
         project.assets = [MediaAsset(name: "Clip", path: "/tmp/mag.mp4", type: .video, duration: 4)]

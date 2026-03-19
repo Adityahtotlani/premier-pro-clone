@@ -63,6 +63,9 @@ A macOS-first open-source non-linear editor prototype inspired by Premiere Pro a
   - insert/overwrite timeline edit mode toggle
   - per-track timeline lanes with add/reorder/remove and target/mute/solo/lock controls
   - timeline clip edge trim handles (drag left/right edge to adjust in/out quickly)
+  - timeline snap toggle + snap guide for drags/trims against nearby edit points
+  - slide edit buttons for contiguous middle clips in track mode
+  - live trim preview overlays while dragging clip edges
   - keyboard playback commands (`Space`, `,`, `.`, `Cmd+Left`, `Cmd+Right`)
   - JKL shuttle controls (`J` back step, `K` stop, `L` play/2x)
   - timeline keyboard controls for edit mode + track creation (`Cmd+Shift+W`, `Cmd+Opt+Shift+V/A`)
