@@ -174,6 +174,9 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
     }
 
     public func preflight(project: Project, sequence: EditorSequence) -> RenderEngineError? {
+        if activeJob != nil {
+            return .queueBusy
+        }
         #if canImport(AVFoundation)
         do {
             try validate(sequence: sequence, project: project)

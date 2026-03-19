@@ -206,6 +206,25 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(slippedAudio?.inTime, 1.0, accuracy: 0.0001)
     }
 
+    func testCanTrimSelectedClipRespectsSelectionAndLock() {
+        var project = ProjectFactory.starterProject(name: "TrimSelection")
+        project.assets = [MediaAsset(name: "Clip", path: "/tmp/trim-selection.mp4", type: .video, duration: 8)]
+
+        let workspace = EditorWorkspace(project: project)
+        XCTAssertFalse(workspace.canTrimSelectedClip)
+
+        workspace.appendFirstAssetToTimeline()
+        XCTAssertTrue(workspace.canTrimSelectedClip)
+
+        guard let trackID = workspace.activeSequence?.videoTracks.first?.id else {
+            XCTFail("Expected a video track")
+            return
+        }
+
+        workspace.toggleTrackLock(trackID: trackID)
+        XCTAssertFalse(workspace.canTrimSelectedClip)
+    }
+
     func testMagneticInsertShiftsExistingTimeline() {
         var project = ProjectFactory.starterProject(name: "MagneticInsert")
         project.assets = [MediaAsset(name: "Clip", path: "/tmp/mag.mp4", type: .video, duration: 4)]
@@ -771,6 +790,16 @@ final class AppShellTests: XCTestCase {
         } else {
             XCTFail("Expected missing media export status")
         }
+    }
+
+    func testExportSupportHintSuggestsTimelineNextStepForEmptySequence() {
+        let workspace = EditorWorkspace(project: ProjectFactory.starterProject(name: "EmptySequence"))
+
+        XCTAssertEqual(workspace.exportSupportStatus, .emptySequence)
+        XCTAssertEqual(
+            workspace.exportSupportHint,
+            "Append the first clip or drag media from Browser into the timeline."
+        )
     }
 
     func testEnqueueExportUsesRequestedPresetID() {

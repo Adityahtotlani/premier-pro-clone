@@ -368,6 +368,13 @@ public final class EditorWorkspace: ObservableObject {
         return !targets.isEmpty && !hasLockedTrack(in: targets)
     }
 
+    public var canTrimSelectedClip: Bool {
+        guard let selection = clipSelection else {
+            return false
+        }
+        return !isTrackLocked(selection.trackID)
+    }
+
     public var exportSupportMessage: String {
         switch exportSupportStatus {
         case .ready:
@@ -378,6 +385,25 @@ public final class EditorWorkspace: ObservableObject {
             return "Export not supported: \(reason)"
         case .emptySequence:
             return "Add clips to the sequence before exporting."
+        }
+    }
+
+    public var exportSupportHint: String? {
+        switch exportSupportStatus {
+        case .ready:
+            return "Choose a preset, then export."
+        case .missingMedia:
+            return "Use Relink Missing Media in Browser or Project Health, then try again."
+        case .emptySequence:
+            return "Append the first clip or drag media from Browser into the timeline."
+        case .unsupported(let reason):
+            if reason == "Another export is already running." {
+                return "Open Export Queue to monitor or cancel the current export."
+            }
+            if reason == "No active sequence selected." {
+                return "Create or select a sequence before exporting."
+            }
+            return "Use a simple track-mode sequence with one video and one audio track for this prototype export path."
         }
     }
 
@@ -4745,10 +4771,18 @@ public struct EditorRootView: View {
     }
 
     private var exportSupportBanner: some View {
-        HStack {
-            Image(systemName: "info.circle")
-            Text(workspace.exportSupportMessage)
-                .font(.caption)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "info.circle")
+                Text(workspace.exportSupportMessage)
+                    .font(.caption)
+            }
+            if let hint = workspace.exportSupportHint {
+                Text(hint)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 22)
+            }
         }
         .foregroundStyle(.secondary)
         .padding(10)
@@ -5779,7 +5813,11 @@ public struct EditorRootView: View {
                     toolbarButton("Nudge -", systemImage: "arrow.left") { workspace.nudgeSelectedClips(by: -0.5) }
                     toolbarButton("Nudge +", systemImage: "arrow.right") { workspace.nudgeSelectedClips(by: 0.5) }
                     toolbarButton("Trim In", systemImage: "arrow.right.to.line.compact") { workspace.trimSelectedClipLeading(by: 0.1) }
+                        .disabled(!workspace.canTrimSelectedClip)
+                        .help("Trim the selected clip start by 0.1 seconds.")
                     toolbarButton("Trim Out", systemImage: "arrow.left.to.line.compact") { workspace.trimSelectedClipTrailing(by: 0.1) }
+                        .disabled(!workspace.canTrimSelectedClip)
+                        .help("Trim the selected clip end by 0.1 seconds.")
                     toolbarButton("Slip -", systemImage: "arrow.left.and.line.vertical.and.arrow.right") { workspace.slipSelectedClip(by: -0.1) }
                         .disabled(!workspace.canSlipSelectedClip)
                         .help("Slip selected clip content backward by 0.1 seconds.")
@@ -5843,12 +5881,24 @@ public struct EditorRootView: View {
                         Divider()
                         Button(workspace.exportSupportMessage) {}
                             .disabled(true)
+                        if let hint = workspace.exportSupportHint {
+                            Button(hint) {}
+                                .disabled(true)
+                        }
                         switch workspace.exportSupportStatus {
                         case .missingMedia:
                             Button("Relink Missing Media") { workspace.relinkFirstMissingAssetUsingDialog() }
                         case .emptySequence:
                             Button("Append First Clip") { workspace.appendFirstAssetToTimeline() }
-                        case .ready, .unsupported:
+                        case .unsupported(let reason):
+                            if reason == "Another export is already running." {
+                                Button("Open Export Queue") { showsExportQueue = true }
+                            } else if reason == "No active sequence selected." {
+                                Button("Create Sequence") { workspace.createSequence() }
+                            } else {
+                                EmptyView()
+                            }
+                        case .ready:
                             EmptyView()
                         }
                         if let latest = workspace.exportHistory.first {
@@ -6576,10 +6626,12 @@ public struct EditorRootView: View {
                             workspace.selectClip(clip.id)
                             workspace.trimSelectedClipLeading(by: 0.1)
                         }
+                        .disabled(isLocked)
                         Button("Trim End +0.1s") {
                             workspace.selectClip(clip.id)
                             workspace.trimSelectedClipTrailing(by: 0.1)
                         }
+                        .disabled(isLocked)
                         Divider()
                         Button("Ripple Delete", role: .destructive) {
                             workspace.selectClip(clip.id)
@@ -7091,6 +7143,11 @@ public struct EditorRootView: View {
                     Text(workspace.exportSupportMessage)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                    if let hint = workspace.exportSupportHint {
+                        Text(hint)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     exportSupportActionRow
                 }
             }
@@ -7183,6 +7240,11 @@ public struct EditorRootView: View {
                     Text(workspace.exportSupportMessage)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if let hint = workspace.exportSupportHint {
+                        Text(hint)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     exportSupportActionRow
                 }
             }
@@ -7248,7 +7310,21 @@ public struct EditorRootView: View {
                 workspace.appendFirstAssetToTimeline()
             }
             .buttonStyle(.bordered)
-        case .ready, .unsupported:
+        case .unsupported(let reason):
+            if reason == "Another export is already running." {
+                Button("Open Export Queue") {
+                    showsExportQueue = true
+                }
+                .buttonStyle(.bordered)
+            } else if reason == "No active sequence selected." {
+                Button("Create Sequence") {
+                    workspace.createSequence()
+                }
+                .buttonStyle(.bordered)
+            } else {
+                EmptyView()
+            }
+        case .ready:
             EmptyView()
         }
     }

@@ -34,6 +34,20 @@ final class RenderCoreTests: XCTestCase {
         }
     }
 
+    func testPreflightRejectsWhenQueueIsBusy() throws {
+        let engine = RenderEngine()
+        let project = ProjectFactory.starterProject(name: "BusyQueue")
+        let sequence = project.sequences[0]
+
+        _ = try engine.enqueue(
+            projectID: project.id,
+            sequenceID: sequence.id,
+            presetID: "youtube-1080p-h264"
+        )
+
+        XCTAssertEqual(engine.preflight(project: project, sequence: sequence), .queueBusy)
+    }
+
     #if canImport(AVFoundation)
     func testExportSimpleSequenceProducesFile() async throws {
         let tempDirectory = FileManager.default.temporaryDirectory
