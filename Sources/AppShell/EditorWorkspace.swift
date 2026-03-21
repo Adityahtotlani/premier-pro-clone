@@ -4690,6 +4690,8 @@ public struct EditorRootView: View {
                         enterEditor()
                     }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityLabel("New Project")
+                    .accessibilityIdentifier("home.primary.new-project")
 
                     Button("Open Project") {
                         let previousProjectURL = workspace.currentProjectBundleURL
@@ -4699,11 +4701,15 @@ public struct EditorRootView: View {
                         }
                     }
                     .buttonStyle(.bordered)
+                    .accessibilityLabel("Open Project")
+                    .accessibilityIdentifier("home.primary.open-project")
 
                     Button("Open Editor") {
                         enterEditor()
                     }
                     .buttonStyle(.bordered)
+                    .accessibilityLabel("Open Editor")
+                    .accessibilityIdentifier("home.primary.open-editor")
                 }
             } else {
                 HStack(spacing: 10) {
@@ -4712,6 +4718,8 @@ public struct EditorRootView: View {
                         enterEditor()
                     }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityLabel("New Project")
+                    .accessibilityIdentifier("home.primary.new-project")
 
                     Button("Open Project") {
                         let previousProjectURL = workspace.currentProjectBundleURL
@@ -4721,11 +4729,15 @@ public struct EditorRootView: View {
                         }
                     }
                     .buttonStyle(.bordered)
+                    .accessibilityLabel("Open Project")
+                    .accessibilityIdentifier("home.primary.open-project")
 
                     Button("Open Editor") {
                         enterEditor()
                     }
                     .buttonStyle(.bordered)
+                    .accessibilityLabel("Open Editor")
+                    .accessibilityIdentifier("home.primary.open-editor")
                 }
             }
 
@@ -4840,6 +4852,8 @@ public struct EditorRootView: View {
         .padding(14)
         .background(Color.white.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("home.panel.quick-start")
     }
 
     private var projectHealthHomePanel: some View {
@@ -4911,6 +4925,8 @@ public struct EditorRootView: View {
         .padding(14)
         .background(Color.white.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("home.panel.project-health")
     }
 
     private var latestAutosaveSummary: String {
@@ -5433,6 +5449,20 @@ public struct EditorRootView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    private func accessibilitySlug(_ value: String) -> String {
+        let lowered = value.lowercased()
+        let filtered = lowered.map { character -> Character in
+            if character.isLetter || character.isNumber {
+                return character
+            }
+            return "-"
+        }
+        let collapsed = String(filtered)
+            .replacingOccurrences(of: "-+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return collapsed.isEmpty ? "control" : collapsed
+    }
+
     private func quickStartActionButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: systemImage)
@@ -5441,6 +5471,8 @@ public struct EditorRootView: View {
         }
         .buttonStyle(.bordered)
         .tint(Color.white.opacity(0.28))
+        .accessibilityLabel(title)
+        .accessibilityIdentifier("home.action.\(accessibilitySlug(title))")
     }
 
     private var browserPanel: some View {
@@ -6205,14 +6237,14 @@ public struct EditorRootView: View {
 
     private func transportButtons(usesSpacer: Bool = true) -> some View {
         HStack(spacing: 6) {
-            tinyRoundButton("backward.end.fill") { seekProgram(to: 0) }
-            tinyRoundButton("backward.frame.fill") { stepProgramFrame(-1) }
-            tinyRoundButton(workspace.isPlaying ? "pause.fill" : "play.fill") { toggleProgramPlayback() }
-            tinyRoundButton("forward.frame.fill") { stepProgramFrame(1) }
-            tinyRoundButton("forward.end.fill") { seekProgram(to: workspace.activeSequence?.duration ?? 0) }
-            tinyRoundButton("inset.filled.left") { workspace.setInPointAtPlayhead() }
-            tinyRoundButton("inset.filled.right") { workspace.setOutPointAtPlayhead() }
-            tinyRoundButton(workspace.isLoopPlaybackEnabled ? "repeat.circle.fill" : "repeat.circle") {
+            tinyRoundButton("backward.end.fill", label: "Go to Timeline Start") { seekProgram(to: 0) }
+            tinyRoundButton("backward.frame.fill", label: "Step Back One Frame") { stepProgramFrame(-1) }
+            tinyRoundButton(workspace.isPlaying ? "pause.fill" : "play.fill", label: workspace.isPlaying ? "Pause Playback" : "Start Playback") { toggleProgramPlayback() }
+            tinyRoundButton("forward.frame.fill", label: "Step Forward One Frame") { stepProgramFrame(1) }
+            tinyRoundButton("forward.end.fill", label: "Go to Timeline End") { seekProgram(to: workspace.activeSequence?.duration ?? 0) }
+            tinyRoundButton("inset.filled.left", label: "Set Timeline In Point") { workspace.setInPointAtPlayhead() }
+            tinyRoundButton("inset.filled.right", label: "Set Timeline Out Point") { workspace.setOutPointAtPlayhead() }
+            tinyRoundButton(workspace.isLoopPlaybackEnabled ? "repeat.circle.fill" : "repeat.circle", label: workspace.isLoopPlaybackEnabled ? "Disable Loop Playback" : "Enable Loop Playback") {
                 workspace.toggleLoopPlayback()
             }
             if usesSpacer {
@@ -6273,8 +6305,8 @@ public struct EditorRootView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                tinyRoundButton("plus") { adjustViewerZoom(for: kind, delta: 0.1) }
-                tinyRoundButton("minus") { adjustViewerZoom(for: kind, delta: -0.1) }
+                tinyRoundButton("plus", label: "\(title) Zoom In") { adjustViewerZoom(for: kind, delta: 0.1) }
+                tinyRoundButton("minus", label: "\(title) Zoom Out") { adjustViewerZoom(for: kind, delta: -0.1) }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -6332,25 +6364,27 @@ public struct EditorRootView: View {
     private var sourceViewerControls: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                tinyRoundButton("backward.frame.fill") {
+                tinyRoundButton("backward.frame.fill", label: "Source Step Back One Frame") {
                     workspace.updateSourcePlayhead(to: workspace.sourcePlayheadTime - (1.0 / max(1, workspace.project.fps)))
                 }
-                tinyRoundButton("forward.frame.fill") {
+                tinyRoundButton("forward.frame.fill", label: "Source Step Forward One Frame") {
                     workspace.updateSourcePlayhead(to: workspace.sourcePlayheadTime + (1.0 / max(1, workspace.project.fps)))
                 }
-                tinyRoundButton("inset.filled.left") { workspace.setSourceInPointAtPlayhead() }
-                tinyRoundButton("inset.filled.right") { workspace.setSourceOutPointAtPlayhead() }
-                tinyRoundButton("xmark.circle") { workspace.clearSourceInOutPoints() }
+                tinyRoundButton("inset.filled.left", label: "Set Source In Point") { workspace.setSourceInPointAtPlayhead() }
+                tinyRoundButton("inset.filled.right", label: "Set Source Out Point") { workspace.setSourceOutPointAtPlayhead() }
+                tinyRoundButton("xmark.circle", label: "Clear Source In and Out Points") { workspace.clearSourceInOutPoints() }
                 Button("Insert") {
                     workspace.appendSelectedSourceRangeToTimeline()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(sourceAsset == nil)
+                .accessibilityIdentifier("source.insert")
                 Button("Append End") {
                     workspace.appendSelectedAssetToTimelineEnd()
                 }
                 .buttonStyle(.bordered)
                 .disabled(sourceAsset == nil)
+                .accessibilityIdentifier("source.append-end")
                 Text(workspace.timecode(workspace.sourcePlayheadTime))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.85))
@@ -6373,10 +6407,10 @@ public struct EditorRootView: View {
     private var programViewerControls: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                tinyRoundButton("gobackward.10") { seekProgramBy(-10) }
-                tinyRoundButton(workspace.isPlaying ? "pause.fill" : "play.fill") { toggleProgramPlayback() }
-                tinyRoundButton("goforward.10") { seekProgramBy(10) }
-                tinyRoundButton(workspace.isPreviewMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
+                tinyRoundButton("gobackward.10", label: "Skip Back Ten Seconds") { seekProgramBy(-10) }
+                tinyRoundButton(workspace.isPlaying ? "pause.fill" : "play.fill", label: workspace.isPlaying ? "Pause Program Playback" : "Start Program Playback") { toggleProgramPlayback() }
+                tinyRoundButton("goforward.10", label: "Skip Forward Ten Seconds") { seekProgramBy(10) }
+                tinyRoundButton(workspace.isPreviewMuted ? "speaker.slash.fill" : "speaker.wave.2.fill", label: workspace.isPreviewMuted ? "Unmute Program Audio" : "Mute Program Audio") {
                     workspace.togglePreviewMute()
                 }
                 Slider(
@@ -6491,6 +6525,8 @@ public struct EditorRootView: View {
                     }
                     .buttonStyle(.bordered)
                     .tint(isTimelineSnappingEnabled ? Color(red: 0.31, green: 0.84, blue: 0.88) : Color.gray.opacity(0.7))
+                    .accessibilityLabel(isTimelineSnappingEnabled ? "Disable Snapping" : "Enable Snapping")
+                    .accessibilityIdentifier("timeline.toggle-snapping")
                     .help("Align dragged clips and trims to nearby edit points.")
                     if let snap = activeSnapPreview {
                         Text("Snap: \(snap.label)")
@@ -7893,8 +7929,13 @@ public struct EditorRootView: View {
         return baseTint.opacity(0.78)
     }
 
-    private func tinyRoundButton(_ systemImage: String, action: (() -> Void)? = nil) -> some View {
-        Button {
+    private func tinyRoundButton(
+        _ systemImage: String,
+        label: String? = nil,
+        action: (() -> Void)? = nil
+    ) -> some View {
+        let accessibilityName = label ?? systemImage.replacingOccurrences(of: ".", with: " ")
+        return Button {
             action?()
         } label: {
             Image(systemName: systemImage)
@@ -7904,6 +7945,8 @@ public struct EditorRootView: View {
         .buttonStyle(.plain)
         .foregroundStyle(.white.opacity(action == nil ? 0.58 : 0.82))
         .allowsHitTesting(action != nil)
+        .accessibilityLabel(accessibilityName)
+        .accessibilityIdentifier("control.\(accessibilitySlug(accessibilityName))")
         .background(
             Circle()
                 .fill(Color.white.opacity(action == nil ? 0.05 : 0.08))
@@ -7921,6 +7964,8 @@ public struct EditorRootView: View {
         }
         .buttonStyle(.bordered)
         .tint(Color(red: 0.40, green: 0.40, blue: 0.43))
+        .accessibilityLabel(title)
+        .accessibilityIdentifier("toolbar.\(accessibilitySlug(title))")
     }
 
     private func symbol(for type: MediaAsset.AssetType) -> String {

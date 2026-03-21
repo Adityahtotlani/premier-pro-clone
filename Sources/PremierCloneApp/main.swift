@@ -5,9 +5,64 @@ import AppKit
 #endif
 
 #if canImport(AppKit)
+@MainActor
 final class PremierCloneAppDelegate: NSObject, NSApplicationDelegate {
+    private var pendingWindowOpenRetries = 0
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
+        DispatchQueue.main.async {
+            self.ensurePrimaryWindowIsVisible()
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        ensurePrimaryWindowIsVisible()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            DispatchQueue.main.async {
+                self.ensurePrimaryWindowIsVisible()
+            }
+        }
+        return true
+    }
+
+    private func ensurePrimaryWindowIsVisible() {
+        if NSApp.windows.contains(where: { $0.isVisible }) {
+            pendingWindowOpenRetries = 0
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        if triggerMenuItem(named: "New Premier Clone Window", in: "File") ||
+            triggerMenuItem(named: "New Window", in: "File") {
+            pendingWindowOpenRetries = 0
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        guard pendingWindowOpenRetries < 3 else { return }
+        pendingWindowOpenRetries += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            self.ensurePrimaryWindowIsVisible()
+        }
+    }
+
+    private func triggerMenuItem(named itemTitle: String, in menuTitle: String) -> Bool {
+        guard let mainMenu = NSApp.mainMenu else { return false }
+
+        for menuItem in mainMenu.items where menuItem.title == menuTitle {
+            guard let submenu = menuItem.submenu,
+                  let targetItem = submenu.items.first(where: { $0.title == itemTitle }) else {
+                continue
+            }
+            submenu.performActionForItem(at: submenu.index(of: targetItem))
+            return true
+        }
+
+        return false
     }
 }
 #endif
