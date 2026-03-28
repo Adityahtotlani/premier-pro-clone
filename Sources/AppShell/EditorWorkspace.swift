@@ -419,7 +419,7 @@ public final class EditorWorkspace: ObservableObject {
     public var exportSupportMessage: String {
         switch exportSupportStatus {
         case .ready:
-            return "Export ready (prototype: 1 video + 1 audio track; no effects/transforms/gain yet)."
+            return "Export ready. Supports multiple tracks, clip transforms, and per-clip gain."
         case .missingMedia(let reason):
             return "Relink media before exporting: \(reason)"
         case .unsupported(let reason):
@@ -444,7 +444,7 @@ public final class EditorWorkspace: ObservableObject {
             if reason == "No active sequence selected." {
                 return "Create or select a sequence before exporting."
             }
-            return "Use a simple track-mode sequence with one video and one audio track for this prototype export path."
+            return "Check for missing media or unsupported effects, then try again."
         }
     }
 

@@ -86,20 +86,18 @@ final class RenderCoreTests: XCTestCase {
         XCTAssertGreaterThan(fileSize, 0)
     }
 
-    func testExportFailsForUnsupportedSequence() async throws {
+    func testExportMultiTrackSequenceProducesFile() async throws {
         let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("RenderCoreExportUnsupported-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("RenderCoreMultiTrack-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
-
-        defer {
-            try? FileManager.default.removeItem(at: tempDirectory)
-        }
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
 
         let sourceURL = tempDirectory.appendingPathComponent("source.mov")
         try writeTestVideo(to: sourceURL, duration: 1.0)
 
         let asset = MediaAsset(name: "Source", path: sourceURL.path(), type: .video, duration: 1.0)
         let clip = ClipRef(assetID: asset.id, inTime: 0, outTime: 1.0, timelineIn: 0)
+        // Two video tracks — previously blocked, now supported
         let trackA = TimelineTrack(name: "V1", kind: .video, clips: [clip])
         let trackB = TimelineTrack(name: "V2", kind: .video, clips: [clip])
         let sequence = EditorSequence(
@@ -114,16 +112,80 @@ final class RenderCoreTests: XCTestCase {
         _ = try engine.enqueue(projectID: project.id, sequenceID: sequence.id, presetID: "youtube-1080p-h264")
         let preset = ExportPresetRegistry().preset(id: "youtube-1080p-h264")!
         let outputURL = tempDirectory.appendingPathComponent("export.mp4")
+        try await engine.export(project: project, sequence: sequence, preset: preset, outputURL: outputURL) { _ in }
+        _ = try engine.completeCurrentJob()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path()))
+        let attributes = try FileManager.default.attributesOfItem(atPath: outputURL.path())
+        let fileSize = (attributes[.size] as? NSNumber)?.intValue ?? 0
+        XCTAssertGreaterThan(fileSize, 0)
+    }
+
+    func testExportWithNonDefaultTransformProducesFile() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RenderCoreTransform-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let sourceURL = tempDirectory.appendingPathComponent("source.mov")
+        try writeTestVideo(to: sourceURL, duration: 1.0)
+
+        let asset = MediaAsset(name: "Source", path: sourceURL.path(), type: .video, duration: 1.0)
+        let transform = ClipTransform(positionX: 10, positionY: 0, scaleX: 0.9, scaleY: 0.9, opacity: 0.8)
+        let clip = ClipRef(assetID: asset.id, inTime: 0, outTime: 1.0, timelineIn: 0, transforms: transform)
+        let videoTrack = TimelineTrack(name: "V1", kind: .video, clips: [clip])
+        let sequence = EditorSequence(name: "Sequence 1", mode: .track, duration: 1.0, videoTracks: [videoTrack])
+        let project = Project(name: "Project", fps: 30, sequences: [sequence], assets: [asset])
+
+        let engine = RenderEngine()
+        _ = try engine.enqueue(projectID: project.id, sequenceID: sequence.id, presetID: "youtube-1080p-h264")
+        let preset = ExportPresetRegistry().preset(id: "youtube-1080p-h264")!
+        let outputURL = tempDirectory.appendingPathComponent("export.mp4")
+        try await engine.export(project: project, sequence: sequence, preset: preset, outputURL: outputURL) { _ in }
+        _ = try engine.completeCurrentJob()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path()))
+        let attributes = try FileManager.default.attributesOfItem(atPath: outputURL.path())
+        let fileSize = (attributes[.size] as? NSNumber)?.intValue ?? 0
+        XCTAssertGreaterThan(fileSize, 0)
+    }
+
+    func testTransformIsIdentityHelper() {
+        XCTAssertTrue(ClipTransform().isIdentity)
+        XCTAssertFalse(ClipTransform(positionX: 1).isIdentity)
+        XCTAssertFalse(ClipTransform(scaleX: 0.5).isIdentity)
+        XCTAssertFalse(ClipTransform(opacity: 0.5).isIdentity)
+    }
+
+    func testExportFailsForEffects() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RenderCoreEffects-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let sourceURL = tempDirectory.appendingPathComponent("source.mov")
+        try writeTestVideo(to: sourceURL, duration: 1.0)
+
+        let asset = MediaAsset(name: "Source", path: sourceURL.path(), type: .video, duration: 1.0)
+        let effect = EffectRef(name: "Blur", parameters: ["radius": 5])
+        let clip = ClipRef(assetID: asset.id, inTime: 0, outTime: 1.0, timelineIn: 0, effects: [effect])
+        let videoTrack = TimelineTrack(name: "V1", kind: .video, clips: [clip])
+        let sequence = EditorSequence(name: "Sequence 1", mode: .track, duration: 1.0, videoTracks: [videoTrack])
+        let project = Project(name: "Project", fps: 30, sequences: [sequence], assets: [asset])
+
+        let engine = RenderEngine()
+        _ = try engine.enqueue(projectID: project.id, sequenceID: sequence.id, presetID: "youtube-1080p-h264")
+        let preset = ExportPresetRegistry().preset(id: "youtube-1080p-h264")!
+        let outputURL = tempDirectory.appendingPathComponent("export.mp4")
 
         do {
             try await engine.export(project: project, sequence: sequence, preset: preset, outputURL: outputURL) { _ in }
-            XCTFail("Expected unsupported sequence error")
+            XCTFail("Expected unsupported sequence error for effects")
         } catch let error as RenderEngineError {
-            switch error {
-            case .unsupportedSequence(let reason):
-                XCTAssertTrue(reason.contains("Multiple video tracks"))
-            default:
-                XCTFail("Unexpected error: \(error)")
+            if case .unsupportedSequence = error {
+                // Expected — effects not yet supported
+            } else {
+                XCTFail("Unexpected error type: \(error)")
             }
         }
     }

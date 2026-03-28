@@ -197,7 +197,6 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
         exportSession = nil
     }
 
-    @MainActor
     public func export(
         project: Project,
         sequence: EditorSequence,
@@ -207,7 +206,11 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
     ) async throws {
         try validate(sequence: sequence, project: project)
 
-        let composition = try buildComposition(sequence: sequence, project: project)
+        let (composition, videoTrackMap, audioTrackMap) = try buildComposition(
+            sequence: sequence,
+            project: project
+        )
+
         let presetName = exportPresetName(for: preset)
         guard let session = AVAssetExportSession(asset: composition, presetName: presetName) else {
             throw RenderEngineError.exportFailed("Unable to create export session")
@@ -220,14 +223,32 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
         session.outputURL = outputURL
         session.outputFileType = exportFileType(for: preset)
         session.shouldOptimizeForNetworkUse = true
+
+        // Wire multi-track video composition (handles transforms + track layering)
+        if let videoComp = buildVideoComposition(
+            sequence: sequence,
+            composition: composition,
+            videoTrackMap: videoTrackMap,
+            preset: preset
+        ) {
+            session.videoComposition = videoComp
+        }
+
+        // Wire audio mix (handles per-clip gain)
+        if let audioMix = buildAudioMix(
+            sequence: sequence,
+            composition: composition,
+            audioTrackMap: audioTrackMap
+        ) {
+            session.audioMix = audioMix
+        }
+
         exportSession = session
 
-        let progressTask = Task { @MainActor in
+        let progressTask = Task {
             while !Task.isCancelled {
-                progressHandler(Double(session.progress))
-                if session.status != .exporting {
-                    break
-                }
+                await MainActor.run { progressHandler(Double(session.progress)) }
+                if session.status != .exporting { break }
                 try? await Task.sleep(nanoseconds: 120_000_000)
             }
         }
@@ -237,7 +258,7 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
             exportSession = nil
         }
 
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             session.exportAsynchronously {
                 switch session.status {
                 case .completed:
@@ -256,44 +277,38 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
         }
     }
 
+    // MARK: - Validation
+
     private func validate(sequence: EditorSequence, project: Project) throws {
-        guard sequence.videoTracks.count <= 1 else {
-            throw RenderEngineError.unsupportedSequence("Multiple video tracks are not supported")
+        let allVideoClips = sequence.videoTracks.flatMap(\.clips)
+        let allAudioClips = sequence.audioTracks.flatMap(\.clips)
+
+        for track in sequence.videoTracks {
+            try validateTrack(track, in: project, kind: .video)
         }
-        guard sequence.audioTracks.count <= 1 else {
-            throw RenderEngineError.unsupportedSequence("Multiple audio tracks are not supported")
+        for track in sequence.audioTracks {
+            try validateTrack(track, in: project, kind: .audio)
         }
 
-        if let videoTrack = sequence.videoTracks.first {
-            try validateTrack(videoTrack, in: project, kind: .video)
-        }
-        if let audioTrack = sequence.audioTracks.first {
-            try validateTrack(audioTrack, in: project, kind: .audio)
-        }
-    }
-
-    private func validateTrack(_ track: TimelineTrack, in project: Project, kind: TrackKind) throws {
-        let sorted = track.clips.sorted { $0.timelineIn < $1.timelineIn }
-        for (index, clip) in sorted.enumerated() {
-            if !clip.effects.isEmpty {
-                throw RenderEngineError.unsupportedSequence("Effects are not supported for export")
-            }
-            if clip.transforms.opacity != 1 ||
-                clip.transforms.scaleX != 1 ||
-                clip.transforms.scaleY != 1 ||
-                clip.transforms.positionX != 0 ||
-                clip.transforms.positionY != 0 {
-                throw RenderEngineError.unsupportedSequence("Clip transforms are not supported for export")
-            }
-            if clip.gain != 1 {
-                throw RenderEngineError.unsupportedSequence("Clip gain is not supported for export")
-            }
-
-            if index > 0 {
+        // Check for overlaps within each track
+        for track in sequence.videoTracks + sequence.audioTracks {
+            let sorted = track.clips.sorted { $0.timelineIn < $1.timelineIn }
+            for (index, clip) in sorted.enumerated() where index > 0 {
                 let previous = sorted[index - 1]
                 if clip.timelineIn < previous.timelineIn + previous.duration {
                     throw RenderEngineError.unsupportedSequence("Overlapping clips are not supported")
                 }
+            }
+        }
+
+        _ = allVideoClips
+        _ = allAudioClips
+    }
+
+    private func validateTrack(_ track: TimelineTrack, in project: Project, kind: TrackKind) throws {
+        for clip in track.clips {
+            if !clip.effects.isEmpty {
+                throw RenderEngineError.unsupportedSequence("Effects are not supported for export yet")
             }
 
             guard project.assets.contains(where: { $0.id == clip.assetID }) else {
@@ -314,15 +329,30 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
         }
     }
 
-    private func buildComposition(sequence: EditorSequence, project: Project) throws -> AVMutableComposition {
-        let composition = AVMutableComposition()
+    // MARK: - Composition Building
 
-        if let videoTrack = sequence.videoTracks.first {
-            let compVideo = composition.addMutableTrack(
+    /// Builds the AVMutableComposition from all video and audio tracks.
+    /// Returns the composition plus maps from TimelineTrack → composition track for later use
+    /// in video composition and audio mix building.
+    private func buildComposition(
+        sequence: EditorSequence,
+        project: Project
+    ) throws -> (
+        composition: AVMutableComposition,
+        videoTrackMap: [(timelineTrack: TimelineTrack, compositionTrack: AVMutableCompositionTrack)],
+        audioTrackMap: [(timelineTrack: TimelineTrack, compositionTrack: AVMutableCompositionTrack)]
+    ) {
+        let composition = AVMutableComposition()
+        var videoTrackMap: [(timelineTrack: TimelineTrack, compositionTrack: AVMutableCompositionTrack)] = []
+        var audioTrackMap: [(timelineTrack: TimelineTrack, compositionTrack: AVMutableCompositionTrack)] = []
+
+        for timelineTrack in sequence.videoTracks {
+            guard let compTrack = composition.addMutableTrack(
                 withMediaType: .video,
                 preferredTrackID: kCMPersistentTrackID_Invalid
-            )
-            for clip in videoTrack.clips.sorted(by: { $0.timelineIn < $1.timelineIn }) {
+            ) else { continue }
+
+            for clip in timelineTrack.clips.sorted(by: { $0.timelineIn < $1.timelineIn }) {
                 guard let asset = project.assets.first(where: { $0.id == clip.assetID }) else {
                     throw RenderEngineError.missingMedia("Asset missing for clip")
                 }
@@ -334,20 +364,24 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
                 guard let sourceTrack = source.tracks(withMediaType: .video).first else {
                     throw RenderEngineError.unsupportedSequence("No video track found in \(asset.name)")
                 }
-                let start = CMTime(seconds: max(0, clip.inTime), preferredTimescale: 600)
-                let duration = CMTime(seconds: max(0, clip.duration), preferredTimescale: 600)
-                let timeRange = CMTimeRange(start: start, duration: duration)
+                let timeRange = CMTimeRange(
+                    start: CMTime(seconds: max(0, clip.inTime), preferredTimescale: 600),
+                    duration: CMTime(seconds: max(0, clip.duration), preferredTimescale: 600)
+                )
                 let insertTime = CMTime(seconds: max(0, clip.timelineIn), preferredTimescale: 600)
-                try compVideo?.insertTimeRange(timeRange, of: sourceTrack, at: insertTime)
+                try compTrack.insertTimeRange(timeRange, of: sourceTrack, at: insertTime)
             }
+
+            videoTrackMap.append((timelineTrack: timelineTrack, compositionTrack: compTrack))
         }
 
-        if let audioTrack = sequence.audioTracks.first {
-            let compAudio = composition.addMutableTrack(
+        for timelineTrack in sequence.audioTracks {
+            guard let compTrack = composition.addMutableTrack(
                 withMediaType: .audio,
                 preferredTrackID: kCMPersistentTrackID_Invalid
-            )
-            for clip in audioTrack.clips.sorted(by: { $0.timelineIn < $1.timelineIn }) {
+            ) else { continue }
+
+            for clip in timelineTrack.clips.sorted(by: { $0.timelineIn < $1.timelineIn }) {
                 guard let asset = project.assets.first(where: { $0.id == clip.assetID }) else {
                     throw RenderEngineError.missingMedia("Asset missing for clip")
                 }
@@ -357,17 +391,150 @@ public final class RenderEngine: RenderEngineProtocol, @unchecked Sendable {
                 }
                 let source = AVURLAsset(url: url)
                 guard let sourceTrack = source.tracks(withMediaType: .audio).first else {
-                    continue
+                    continue // audio track in video file may be absent — skip silently
                 }
-                let start = CMTime(seconds: max(0, clip.inTime), preferredTimescale: 600)
-                let duration = CMTime(seconds: max(0, clip.duration), preferredTimescale: 600)
-                let timeRange = CMTimeRange(start: start, duration: duration)
+                let timeRange = CMTimeRange(
+                    start: CMTime(seconds: max(0, clip.inTime), preferredTimescale: 600),
+                    duration: CMTime(seconds: max(0, clip.duration), preferredTimescale: 600)
+                )
                 let insertTime = CMTime(seconds: max(0, clip.timelineIn), preferredTimescale: 600)
-                try compAudio?.insertTimeRange(timeRange, of: sourceTrack, at: insertTime)
+                try compTrack.insertTimeRange(timeRange, of: sourceTrack, at: insertTime)
+            }
+
+            audioTrackMap.append((timelineTrack: timelineTrack, compositionTrack: compTrack))
+        }
+
+        return (composition, videoTrackMap, audioTrackMap)
+    }
+
+    // MARK: - Video Composition (Transforms + Multi-track Layering)
+
+    /// Returns an AVMutableVideoComposition if needed — i.e. when there are multiple video tracks
+    /// or any clip carries non-identity transforms. Returns nil when a simple passthrough suffices.
+    private func buildVideoComposition(
+        sequence: EditorSequence,
+        composition: AVMutableComposition,
+        videoTrackMap: [(timelineTrack: TimelineTrack, compositionTrack: AVMutableCompositionTrack)],
+        preset: ExportPreset
+    ) -> AVMutableVideoComposition? {
+        guard !videoTrackMap.isEmpty else { return nil }
+
+        let needsComposition = videoTrackMap.count > 1
+            || sequence.videoTracks.flatMap(\.clips).contains(where: { !$0.transforms.isIdentity })
+
+        guard needsComposition else { return nil }
+
+        let renderSize = self.renderSize(for: preset)
+        let videoComp = AVMutableVideoComposition()
+        videoComp.renderSize = renderSize
+        videoComp.frameDuration = CMTime(value: 1, timescale: CMTimeScale(preset.fps))
+
+        // Collect all time boundaries across all clips in all video tracks
+        var timeEvents: Set<Double> = [0]
+        let sequenceDuration = sequence.videoTracks.flatMap(\.clips).reduce(0.0) {
+            max($0, $1.timelineIn + $1.duration)
+        }
+        if sequenceDuration > 0 { timeEvents.insert(sequenceDuration) }
+
+        for track in sequence.videoTracks {
+            for clip in track.clips {
+                timeEvents.insert(clip.timelineIn)
+                timeEvents.insert(clip.timelineIn + clip.duration)
             }
         }
 
-        return composition
+        let sortedEvents = timeEvents.sorted()
+        var instructions: [AVMutableVideoCompositionInstruction] = []
+
+        for i in 0..<(sortedEvents.count - 1) {
+            let segStart = sortedEvents[i]
+            let segEnd = sortedEvents[i + 1]
+            guard segEnd > segStart else { continue }
+
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = CMTimeRange(
+                start: CMTime(seconds: segStart, preferredTimescale: 600),
+                duration: CMTime(seconds: segEnd - segStart, preferredTimescale: 600)
+            )
+
+            var layerInstructions: [AVMutableVideoCompositionLayerInstruction] = []
+
+            // Video tracks rendered back-to-front (last track in array = bottom layer).
+            // Reverse so index 0 (topmost timeline track) composites on top.
+            for entry in videoTrackMap.reversed() {
+                let layerInstruction = AVMutableVideoCompositionLayerInstruction(
+                    assetTrack: entry.compositionTrack
+                )
+                let atTime = CMTime(seconds: segStart, preferredTimescale: 600)
+
+                // Find clip active during [segStart, segEnd)
+                let activeClip = entry.timelineTrack.clips.first {
+                    $0.timelineIn <= segStart && $0.timelineIn + $0.duration >= segEnd
+                }
+
+                if let clip = activeClip {
+                    let t = clip.transforms
+                    // Build affine transform: scale around center, then translate
+                    var transform = CGAffineTransform.identity
+                    transform = transform.scaledBy(x: t.scaleX, y: t.scaleY)
+                    transform = transform.translatedBy(x: t.positionX, y: t.positionY)
+                    layerInstruction.setTransform(transform, at: atTime)
+                    layerInstruction.setOpacity(Float(t.opacity), at: atTime)
+                } else {
+                    // No clip active in this track during this segment — hide it
+                    layerInstruction.setOpacity(0, at: atTime)
+                }
+
+                layerInstructions.append(layerInstruction)
+            }
+
+            instruction.layerInstructions = layerInstructions
+            instructions.append(instruction)
+        }
+
+        videoComp.instructions = instructions
+        return videoComp
+    }
+
+    // MARK: - Audio Mix (Per-clip Gain)
+
+    /// Returns an AVMutableAudioMix applying per-clip gain when any clip has non-unity gain.
+    /// Returns nil when all clips use the default gain of 1.0.
+    private func buildAudioMix(
+        sequence: EditorSequence,
+        composition: AVMutableComposition,
+        audioTrackMap: [(timelineTrack: TimelineTrack, compositionTrack: AVMutableCompositionTrack)]
+    ) -> AVMutableAudioMix? {
+        let hasNonUnityGain = sequence.audioTracks.flatMap(\.clips).contains { $0.gain != 1.0 }
+        guard hasNonUnityGain else { return nil }
+
+        let audioMix = AVMutableAudioMix()
+        var inputParameters: [AVMutableAudioMixInputParameters] = []
+
+        for entry in audioTrackMap {
+            let params = AVMutableAudioMixInputParameters(track: entry.compositionTrack)
+            for clip in entry.timelineTrack.clips where clip.gain != 1.0 {
+                let clipStart = CMTime(seconds: clip.timelineIn, preferredTimescale: 600)
+                let clipEnd = CMTime(seconds: clip.timelineIn + clip.duration, preferredTimescale: 600)
+                let timeRange = CMTimeRange(start: clipStart, end: clipEnd)
+                let volume = Float(max(0, min(2.0, clip.gain)))
+                params.setVolumeRamp(fromStartVolume: volume, toEndVolume: volume, for: timeRange)
+            }
+            inputParameters.append(params)
+        }
+
+        audioMix.inputParameters = inputParameters
+        return audioMix
+    }
+
+    // MARK: - Helpers
+
+    private func renderSize(for preset: ExportPreset) -> CGSize {
+        let parts = preset.resolution.split(separator: "x").compactMap { Int($0) }
+        if parts.count == 2 {
+            return CGSize(width: parts[0], height: parts[1])
+        }
+        return CGSize(width: 1920, height: 1080)
     }
 
     private func exportPresetName(for preset: ExportPreset) -> String {

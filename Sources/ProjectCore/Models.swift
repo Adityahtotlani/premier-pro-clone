@@ -74,6 +74,12 @@ public struct ClipTransform: Codable, Equatable, Sendable {
         self.scaleY = scaleY
         self.opacity = opacity
     }
+
+    public var isIdentity: Bool {
+        positionX == 0 && positionY == 0 &&
+        scaleX == 1 && scaleY == 1 &&
+        opacity == 1
+    }
 }
 
 public struct EffectRef: Codable, Equatable, Identifiable, Sendable {
